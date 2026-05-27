@@ -1,0 +1,5 @@
+streamlit
+yfinance
+pandas
+plotly
+robin_stocks
