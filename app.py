@@ -2,9 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
+import requests
 from datetime import datetime
-import json
-import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Quant Trading Dashboard", layout="wide")
@@ -13,7 +12,7 @@ st.markdown("Analyze historical market data, simulate trades, and execute on Rob
 
 # --- SIDEBAR CONTROL PANEL ---
 st.sidebar.header("🛠️ Strategy Parameters")
-ticker = st.sidebar.text_input("Asset Ticker (Yahoo Finance)", value="BTC-USD")
+ticker = st.sidebar.text_input("Asset Ticker", value="BTC-USD")
 timeline = st.sidebar.selectbox("History Period", ["1mo", "3mo", "6mo", "1y"], index=0)
 time_frame = st.sidebar.selectbox("Candle Interval", ["1h", "1d"], index=0)
 st.sidebar.markdown("---")
@@ -21,26 +20,79 @@ initial_capital = st.sidebar.number_input("Starting Capital ($)", value=10000.00
 fast_period = st.sidebar.slider("Fast EMA Period", min_value=2, max_value=50, value=12)
 slow_period = st.sidebar.slider("Slow EMA Period", min_value=5, max_value=100, value=26)
 
-# --- MODE SELECTOR ---
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Mode")
 app_mode = st.sidebar.radio("Select Mode", ["📊 Backtest", "🧪 Simulation", "🤖 Robinhood Live"])
 
 # ============================================================
-# SHARED DATA LOADER
+# COINGECKO CRYPTO ID MAP
 # ============================================================
-@st.cache_data
+CRYPTO_MAP = {
+    "BTC-USD": "bitcoin",
+    "ETH-USD": "ethereum",
+    "SOL-USD": "solana",
+    "DOGE-USD": "dogecoin",
+    "ADA-USD": "cardano",
+    "XRP-USD": "ripple",
+    "LTC-USD": "litecoin",
+    "MATIC-USD": "matic-network",
+    "AVAX-USD": "avalanche-2",
+    "DOT-USD": "polkadot",
+}
+
+PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}
+
+def is_crypto(symbol):
+    return symbol.upper() in CRYPTO_MAP or symbol.upper().endswith("-USD")
+
+def load_crypto_coingecko(symbol, period):
+    coin_id = CRYPTO_MAP.get(symbol.upper())
+    if not coin_id:
+        # Try to guess from symbol like "BTC-USD" -> "bitcoin" won't work, show error
+        return pd.DataFrame()
+    
+    days = PERIOD_DAYS.get(period, 30)
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    params = {"vs_currency": "usd", "days": days}
+    
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if not isinstance(data, list):
+            return pd.DataFrame()
+        df = pd.DataFrame(data, columns=["Datetime", "Open", "High", "Low", "Close"])
+        df["Datetime"] = pd.to_datetime(df["Datetime"], unit="ms")
+        df = df.sort_values("Datetime").reset_index(drop=True)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+def get_live_price_crypto(symbol):
+    coin_id = CRYPTO_MAP.get(symbol.upper())
+    if not coin_id:
+        return None
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        resp = requests.get(url, params={"ids": coin_id, "vs_currencies": "usd"}, timeout=5)
+        return float(resp.json()[coin_id]["usd"])
+    except:
+        return None
+
+@st.cache_data(ttl=300)
 def load_data(symbol, per, inter):
-    df = yf.download(symbol, period=per, interval=inter)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    if is_crypto(symbol):
+        return load_crypto_coingecko(symbol, per)
     else:
-        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-    df.index.name = 'Datetime'
-    df.reset_index(inplace=True)
-    return df
+        df = yf.download(symbol, period=per, interval=inter, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.index.name = 'Datetime'
+        df.reset_index(inplace=True)
+        return df
 
 def get_live_price(symbol):
+    if is_crypto(symbol):
+        return get_live_price_crypto(symbol)
     try:
         data = yf.download(symbol, period="1d", interval="1m", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
@@ -75,16 +127,16 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
     st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================
-# TAB 1: BACKTEST MODE
+# BACKTEST MODE
 # ============================================================
 if app_mode == "📊 Backtest":
     df_raw = load_data(ticker, timeline, time_frame)
 
     if df_raw.empty:
-        st.error("No data found. Please check your ticker symbol or interval.")
+        st.error("No data found. For crypto use tickers like BTC-USD, ETH-USD, SOL-USD. For stocks use AAPL, TSLA etc.")
+        st.info("Supported crypto: " + ", ".join(CRYPTO_MAP.keys()))
     else:
         df = compute_emas(df_raw, fast_period, slow_period)
-
         cash = initial_capital
         position = 0.0
         is_invested = False
@@ -135,15 +187,13 @@ if app_mode == "📊 Backtest":
             st.info("No trades executed. Try tightening your EMA horizons.")
 
 # ============================================================
-# TAB 2: SIMULATION MODE
+# SIMULATION MODE
 # ============================================================
 elif app_mode == "🧪 Simulation":
     st.header("🧪 Simulation Module")
-
     sim_mode = st.radio("Simulation Type", ["📡 Paper Trade (Live Prices)", "🔁 Historical Replay"], horizontal=True)
     auto_trade = st.toggle("🤖 Auto-trade on EMA signals", value=False)
 
-    # Persistent sim state in session
     if 'sim_cash' not in st.session_state:
         st.session_state.sim_cash = initial_capital
         st.session_state.sim_position = 0.0
@@ -172,18 +222,15 @@ elif app_mode == "🧪 Simulation":
             st.session_state.sim_sell_x.append(timestamp)
             st.session_state.sim_sell_y.append(price)
 
-    # --- PAPER TRADE MODE ---
     if sim_mode == "📡 Paper Trade (Live Prices)":
         st.subheader("📡 Paper Trading with Live Prices")
         live_price = get_live_price(ticker)
 
         if live_price:
             st.metric("Current Live Price", f"${live_price:,.2f}")
-
-            df_chart = load_data(ticker, "1d", "1h")
+            df_chart = load_data(ticker, "1mo", "1h")
             df_chart = compute_emas(df_chart, fast_period, slow_period)
 
-            # Auto-trade logic
             if auto_trade and len(df_chart) > slow_period:
                 fast_now = float(df_chart['Fast_EMA'].iloc[-1])
                 slow_now = float(df_chart['Slow_EMA'].iloc[-1])
@@ -195,7 +242,6 @@ elif app_mode == "🧪 Simulation":
                     sim_sell(live_price, now)
                     st.success(f"🤖 Auto-SELL triggered at ${live_price:,.2f}")
 
-            # Manual buttons
             if not auto_trade:
                 col_b, col_s, col_r = st.columns(3)
                 with col_b:
@@ -207,17 +253,17 @@ elif app_mode == "🧪 Simulation":
                         sim_sell(live_price, datetime.now())
                         st.success(f"Sold at ${live_price:,.2f}")
                 with col_r:
-                    if st.button("🔄 Reset Simulation", use_container_width=True):
+                    if st.button("🔄 Reset", use_container_width=True):
                         for key in ['sim_cash','sim_position','sim_invested','sim_trades','sim_buy_x','sim_buy_y','sim_sell_x','sim_sell_y']:
                             del st.session_state[key]
                         st.rerun()
 
-            render_chart(df_chart, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
-                         st.session_state.sim_sell_x, st.session_state.sim_sell_y, fast_period, slow_period)
+            if not df_chart.empty:
+                render_chart(df_chart, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
+                             st.session_state.sim_sell_x, st.session_state.sim_sell_y, fast_period, slow_period)
         else:
             st.error("Could not fetch live price. Check ticker symbol.")
 
-    # --- HISTORICAL REPLAY MODE ---
     else:
         st.subheader("🔁 Historical Data Replay")
         df_replay = load_data(ticker, timeline, time_frame)
@@ -235,7 +281,6 @@ elif app_mode == "🧪 Simulation":
             if st.button("⏩ Step Forward 10 Candles"):
                 st.session_state.replay_idx = min(st.session_state.replay_idx + 10, len(df_replay) - 1)
 
-        # Slice to current replay point
         idx = st.session_state.replay_idx
         df_visible = df_replay.iloc[:idx+1].copy()
         current_price = float(df_visible['Close'].iloc[-1])
@@ -243,7 +288,6 @@ elif app_mode == "🧪 Simulation":
 
         st.metric("Current Replay Price", f"${current_price:,.2f}", f"Candle {idx} of {len(df_replay)}")
 
-        # Auto-trade on replay step
         if auto_trade and len(df_visible) > slow_period:
             fast_now = float(df_visible['Fast_EMA'].iloc[-1])
             slow_now = float(df_visible['Slow_EMA'].iloc[-1])
@@ -261,7 +305,7 @@ elif app_mode == "🧪 Simulation":
                 if st.button("🔴 SELL at Current Price", use_container_width=True):
                     sim_sell(current_price, timestamp)
             with col_r2:
-                if st.button("🔄 Reset Simulation", use_container_width=True):
+                if st.button("🔄 Reset", use_container_width=True):
                     for key in ['sim_cash','sim_position','sim_invested','sim_trades','sim_buy_x','sim_buy_y','sim_sell_x','sim_sell_y','replay_idx']:
                         del st.session_state[key]
                     st.rerun()
@@ -269,29 +313,24 @@ elif app_mode == "🧪 Simulation":
         render_chart(df_visible, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
                      st.session_state.sim_sell_x, st.session_state.sim_sell_y, fast_period, slow_period)
 
-    # Portfolio summary
     st.markdown("---")
-    current_price_for_value = get_live_price(ticker) or 0
-    net_worth = st.session_state.sim_cash if not st.session_state.sim_invested else (st.session_state.sim_position * current_price_for_value)
+    live_val = get_live_price(ticker) or 0
+    net_worth = st.session_state.sim_cash if not st.session_state.sim_invested else (st.session_state.sim_position * live_val)
     total_return = ((net_worth - initial_capital) / initial_capital) * 100
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Starting Capital", f"${initial_capital:,.2f}")
     c2.metric("Sim Net Worth", f"${net_worth:,.2f}")
     c3.metric("Sim Return", f"{total_return:+.2f}%")
     c4.metric("Sim Trades", len(st.session_state.sim_trades))
-
     if st.session_state.sim_trades:
         st.subheader("📜 Simulation Trade Log")
         st.dataframe(pd.DataFrame(st.session_state.sim_trades), use_container_width=True)
 
 # ============================================================
-# TAB 3: ROBINHOOD LIVE
+# ROBINHOOD LIVE
 # ============================================================
 elif app_mode == "🤖 Robinhood Live":
     st.header("🤖 Robinhood Live Trading")
-
-    # Check if robin_stocks is installed
     try:
         import robin_stocks.robinhood as r
         rh_available = True
@@ -301,13 +340,10 @@ elif app_mode == "🤖 Robinhood Live":
     if not rh_available:
         st.error("robin_stocks is not installed.")
         st.code("python -m pip install robin_stocks", language="bash")
-        st.info("Run the above command in your terminal, then restart the app.")
     else:
         st.warning("⚠️ This mode executes REAL trades with REAL money. Use with caution.")
-
-        # Login section
         with st.expander("🔐 Robinhood Login", expanded='rh_logged_in' not in st.session_state):
-            rh_user = st.text_input("Robinhood Email", type="default")
+            rh_user = st.text_input("Robinhood Email")
             rh_pass = st.text_input("Robinhood Password", type="password")
             if st.button("Login to Robinhood"):
                 try:
@@ -318,8 +354,6 @@ elif app_mode == "🤖 Robinhood Live":
                     st.error(f"Login failed: {e}")
 
         if st.session_state.get('rh_logged_in'):
-
-            # Portfolio Overview
             st.subheader("💼 Portfolio Overview")
             try:
                 profile = r.load_portfolio_profile()
@@ -331,7 +365,6 @@ elif app_mode == "🤖 Robinhood Live":
             except Exception as e:
                 st.error(f"Could not load portfolio: {e}")
 
-            # Current Positions
             st.subheader("📦 Current Positions")
             try:
                 positions = r.get_open_stock_positions()
@@ -339,11 +372,7 @@ elif app_mode == "🤖 Robinhood Live":
                     pos_data = []
                     for p in positions:
                         instrument = r.get_instrument_by_url(p['instrument'])
-                        pos_data.append({
-                            "Symbol": instrument.get('symbol', 'N/A'),
-                            "Quantity": float(p.get('quantity', 0)),
-                            "Avg Buy Price": float(p.get('average_buy_price', 0))
-                        })
+                        pos_data.append({"Symbol": instrument.get('symbol', 'N/A'), "Quantity": float(p.get('quantity', 0)), "Avg Buy Price": float(p.get('average_buy_price', 0))})
                     st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
                 else:
                     st.info("No open positions.")
@@ -351,74 +380,64 @@ elif app_mode == "🤖 Robinhood Live":
                 st.error(f"Could not load positions: {e}")
 
             st.markdown("---")
-
-            # Live price
             live_price = get_live_price(ticker)
             if live_price:
                 st.metric(f"Live Price: {ticker}", f"${live_price:,.2f}")
 
-            # EMA Signal
-            df_live = load_data(ticker, "5d", "1h")
+            df_live = load_data(ticker, "1mo", "1h")
             df_live = compute_emas(df_live, fast_period, slow_period)
             fast_now = float(df_live['Fast_EMA'].iloc[-1])
             slow_now = float(df_live['Slow_EMA'].iloc[-1])
             signal = "🟢 BUY Signal" if fast_now > slow_now else "🔴 SELL Signal"
             st.subheader(f"EMA Signal: {signal}")
 
-            # Auto-trade toggle
             rh_auto = st.toggle("🤖 Auto-execute trades on EMA signal", value=False)
+            crypto_symbol = ticker.replace("-USD", "")
 
             if rh_auto:
-                st.warning("Auto-trading is ON — trades will execute automatically based on EMA crossover.")
+                st.warning("Auto-trading is ON.")
                 if fast_now > slow_now:
-                    if st.button("⚡ Execute AUTO-BUY on Robinhood"):
+                    if st.button("⚡ Execute AUTO-BUY"):
                         try:
-                            # Robinhood crypto symbols need no hyphen e.g. "BTC"
-                            crypto_symbol = ticker.replace("-USD", "")
                             order = r.order_buy_crypto_by_price(crypto_symbol, buying_power * 0.99)
-                            st.success(f"✅ BUY order placed! Order ID: {order.get('id', 'N/A')}")
+                            st.success(f"✅ BUY placed! ID: {order.get('id')}")
                         except Exception as e:
                             st.error(f"Order failed: {e}")
                 else:
-                    if st.button("⚡ Execute AUTO-SELL on Robinhood"):
+                    if st.button("⚡ Execute AUTO-SELL"):
                         try:
-                            crypto_symbol = ticker.replace("-USD", "")
                             holdings = r.get_crypto_positions()
                             for h in holdings:
                                 if h['currency']['code'] == crypto_symbol:
                                     qty = float(h['quantity_available'])
                                     order = r.order_sell_crypto_by_quantity(crypto_symbol, qty)
-                                    st.success(f"✅ SELL order placed! Order ID: {order.get('id', 'N/A')}")
+                                    st.success(f"✅ SELL placed! ID: {order.get('id')}")
                         except Exception as e:
                             st.error(f"Order failed: {e}")
             else:
-                # Manual trading
-                st.subheader("🖱️ Manual Trade Execution")
                 col_b, col_s = st.columns(2)
                 with col_b:
                     buy_amount = st.number_input("Buy Amount ($)", min_value=1.0, value=100.0, step=10.0)
                     if st.button("🟢 Place BUY Order", use_container_width=True):
                         try:
-                            crypto_symbol = ticker.replace("-USD", "")
                             order = r.order_buy_crypto_by_price(crypto_symbol, buy_amount)
-                            st.success(f"✅ BUY order placed for ${buy_amount}! ID: {order.get('id', 'N/A')}")
+                            st.success(f"✅ BUY placed for ${buy_amount}! ID: {order.get('id')}")
                         except Exception as e:
                             st.error(f"Order failed: {e}")
                 with col_s:
                     sell_pct = st.slider("Sell % of Holdings", 1, 100, 100)
                     if st.button("🔴 Place SELL Order", use_container_width=True):
                         try:
-                            crypto_symbol = ticker.replace("-USD", "")
                             holdings = r.get_crypto_positions()
                             for h in holdings:
                                 if h['currency']['code'] == crypto_symbol:
                                     qty = float(h['quantity_available']) * (sell_pct / 100)
                                     order = r.order_sell_crypto_by_quantity(crypto_symbol, qty)
-                                    st.success(f"✅ SELL order placed for {sell_pct}% of holdings! ID: {order.get('id', 'N/A')}")
+                                    st.success(f"✅ SELL placed! ID: {order.get('id')}")
                         except Exception as e:
                             st.error(f"Order failed: {e}")
 
-            # Chart
             st.markdown("---")
             st.subheader("📊 Live Chart")
-            render_chart(df_live, [], [], [], [], fast_period, slow_period)
+            if not df_live.empty:
+                render_chart(df_live, [], [], [], [], fast_period, slow_period)
