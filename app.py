@@ -333,6 +333,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
             zeroline=False,
             range=[0, 1.05],
             fixedrange=True,
+            autorange="reversed",
         ),
         yaxis=dict(
             side="right",
