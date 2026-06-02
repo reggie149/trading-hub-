@@ -632,10 +632,14 @@ elif app_mode == "📋 Rules Manager":
 
     RULES_FILE = "trading_rules.json"
 
-    def load_all(file):
+   def load_all(file):
         if os.path.exists(file):
             with open(file, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+            # If old format (flat list of rules), convert to new section format
+            if data and isinstance(data[0], dict) and "rule" in data[0]:
+                return [{"name": "Trading Rules", "rules": data}]
+            return data
         # Default: two starter sections
         return [
             {"name": "Chart Setup", "rules": []},
