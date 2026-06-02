@@ -4,6 +4,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 import numpy as np
 import requests
+import json
+import os
 from datetime import datetime
 
 # --- PAGE CONFIGURATION ---
@@ -23,7 +25,7 @@ slow_period = st.sidebar.slider("Slow EMA Period", min_value=5, max_value=100, v
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Mode")
-app_mode = st.sidebar.radio("Select Mode", ["📊 Backtest", "🧪 Simulation", "🤖 Robinhood Live"])
+app_mode = st.sidebar.radio("Select Mode", ["📊 Backtest", "🧪 Simulation", "🤖 Robinhood Live", "📋 Rules Manager"])
 
 # --- Volume Profile Settings ---
 st.sidebar.markdown("---")
@@ -58,11 +60,9 @@ def load_crypto_coingecko(symbol, period):
     coin_id = CRYPTO_MAP.get(symbol.upper())
     if not coin_id:
         return pd.DataFrame()
-    
     days = PERIOD_DAYS.get(period, 30)
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     params = {"vs_currency": "usd", "days": days}
-    
     try:
         resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
@@ -71,8 +71,6 @@ def load_crypto_coingecko(symbol, period):
         df = pd.DataFrame(data, columns=["Datetime", "Open", "High", "Low", "Close"])
         df["Datetime"] = pd.to_datetime(df["Datetime"], unit="ms")
         df = df.sort_values("Datetime").reset_index(drop=True)
-        # CoinGecko OHLC doesn't return Volume; add a synthetic volume column
-        # using price range as a proxy so Volume Profile still renders meaningfully
         df["Volume"] = (df["High"] - df["Low"]) * 1000
         return df
     except Exception as e:
@@ -122,73 +120,51 @@ def compute_emas(df, fast, slow):
 # VOLUME PROFILE CALCULATION
 # ============================================================
 def compute_volume_profile(df, bins=40):
-    """
-    Compute a Volume Profile by distributing each candle's volume
-    across the price range (High-Low) using bin-level accumulation.
-
-    Returns a dict with:
-      - price_levels : centre price of each bin
-      - volumes      : total volume at each bin
-      - poc_price    : Point of Control (highest volume bin)
-      - vah_price    : Value Area High  (top of 70 % value area)
-      - val_price    : Value Area Low   (bottom of 70 % value area)
-    """
     if df.empty or "Volume" not in df.columns:
         return None
-
     price_min = df["Low"].min()
     price_max = df["High"].max()
     if price_min == price_max:
         return None
-
     bin_edges = np.linspace(price_min, price_max, bins + 1)
     bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
     volume_at_level = np.zeros(bins)
-
     for _, row in df.iterrows():
         vol = float(row["Volume"])
         if vol <= 0 or pd.isna(vol):
             continue
         low, high = float(row["Low"]), float(row["High"])
-        # find which bins overlap this candle's range
-        lo_idx = np.searchsorted(bin_edges, low,  side="left")
+        lo_idx = np.searchsorted(bin_edges, low, side="left")
         hi_idx = np.searchsorted(bin_edges, high, side="right")
         lo_idx = max(0, lo_idx - 1)
         hi_idx = min(bins, hi_idx)
         n_bins = hi_idx - lo_idx
         if n_bins <= 0:
             continue
-        # distribute volume evenly across overlapping bins
         volume_at_level[lo_idx:hi_idx] += vol / n_bins
-
-    # --- Point of Control ---
-    poc_idx   = int(np.argmax(volume_at_level))
+    poc_idx = int(np.argmax(volume_at_level))
     poc_price = bin_centres[poc_idx]
-
-    # --- Value Area (70 % of total volume) ---
-    total_vol  = volume_at_level.sum()
+    total_vol = volume_at_level.sum()
     target_vol = total_vol * 0.70
-    # expand outward from POC until we reach 70 %
     lo_ptr, hi_ptr = poc_idx, poc_idx
     area_vol = volume_at_level[poc_idx]
     while area_vol < target_vol:
-        expand_lo = volume_at_level[lo_ptr - 1] if lo_ptr > 0       else 0
+        expand_lo = volume_at_level[lo_ptr - 1] if lo_ptr > 0 else 0
         expand_hi = volume_at_level[hi_ptr + 1] if hi_ptr < bins - 1 else 0
         if expand_lo == 0 and expand_hi == 0:
             break
         if expand_hi >= expand_lo:
-            hi_ptr  += 1
+            hi_ptr += 1
             area_vol += volume_at_level[hi_ptr]
         else:
-            lo_ptr  -= 1
+            lo_ptr -= 1
             area_vol += volume_at_level[lo_ptr]
-
     return {
         "price_levels": bin_centres,
-        "volumes":       volume_at_level,
-        "poc_price":     poc_price,
-        "vah_price":     bin_centres[hi_ptr],
-        "val_price":     bin_centres[lo_ptr],
+        "volumes": volume_at_level,
+        "poc_price": poc_price,
+        "vah_price": bin_centres[hi_ptr],
+        "val_price": bin_centres[lo_ptr],
     }
 
 # ============================================================
@@ -197,15 +173,12 @@ def compute_volume_profile(df, bins=40):
 def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
     fig = go.Figure()
 
-    # ── Candlestick ──────────────────────────────────────────
     fig.add_trace(go.Candlestick(
         x=df['Datetime'], open=df['Open'], high=df['High'],
-        low=df['Low'],    close=df['Close'],
+        low=df['Low'], close=df['Close'],
         name="Price Action",
         xaxis="x", yaxis="y"
     ))
-
-    # ── EMAs ─────────────────────────────────────────────────
     fig.add_trace(go.Scatter(
         x=df['Datetime'], y=df['Fast_EMA'],
         line=dict(color='orange', width=1.5),
@@ -218,8 +191,6 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
         name=f'{slow_period} Slow EMA',
         xaxis="x", yaxis="y"
     ))
-
-    # ── Buy / Sell signals ────────────────────────────────────
     if buy_x:
         fig.add_trace(go.Scatter(
             x=buy_x, y=buy_y, mode='markers',
@@ -235,33 +206,28 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
             name='SELL Exit', xaxis="x", yaxis="y"
         ))
 
-    # ── Volume Profile (right-side histogram) ─────────────────
     if show_vp:
         vp = compute_volume_profile(df, bins=vp_bins)
         if vp is not None:
-            prices  = vp["price_levels"]
+            prices = vp["price_levels"]
             volumes = vp["volumes"]
-            poc     = vp["poc_price"]
-            vah     = vp["vah_price"]
-            val     = vp["val_price"]
+            poc = vp["poc_price"]
+            vah = vp["vah_price"]
+            val = vp["val_price"]
             max_vol = volumes.max() if volumes.max() > 0 else 1
 
-            # Colour each bar: value-area = teal, outside = grey, POC = yellow
             bar_colours = []
             for p, v in zip(prices, volumes):
                 if abs(p - poc) < (prices[1] - prices[0]) * 0.6:
-                    bar_colours.append("rgba(255, 220, 50, 0.90)")   # POC – yellow
+                    bar_colours.append("rgba(255, 220, 50, 0.90)")
                 elif val <= p <= vah:
-                    bar_colours.append("rgba(50, 200, 180, 0.55)")   # Value Area – teal
+                    bar_colours.append("rgba(50, 200, 180, 0.55)")
                 else:
-                    bar_colours.append("rgba(160, 160, 160, 0.35)")  # Outside – grey
+                    bar_colours.append("rgba(160, 160, 160, 0.35)")
 
-            # Normalise bar widths to 18 % of the price axis span
             price_span = prices[-1] - prices[0]
-            bar_height = price_span / vp_bins * 0.85   # thin bin height in price units
-
-            # We draw the histogram on a secondary x-axis (x2) that runs 0→1
-            norm_vols = volumes / max_vol  # 0–1
+            bar_height = price_span / vp_bins * 0.85
+            norm_vols = volumes / max_vol
 
             fig.add_trace(go.Bar(
                 x=norm_vols,
@@ -277,7 +243,6 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
                 showlegend=True,
             ))
 
-            # ── POC horizontal line ──────────────────────────
             if show_poc:
                 fig.add_shape(
                     type="line",
@@ -294,7 +259,6 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
                     xanchor="left",
                 )
 
-            # ── Value Area band ──────────────────────────────
             if show_value_area:
                 fig.add_shape(
                     type="rect",
@@ -320,14 +284,13 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
                     xanchor="left",
                 )
 
-    # ── Layout ────────────────────────────────────────────────
     fig.update_layout(
         xaxis=dict(
             rangeslider=dict(visible=False),
-            domain=[0, 0.82],          # leave room on right for VP bars
+            domain=[0, 0.82],
         ),
         xaxis2=dict(
-            domain=[0.83, 1.0],        # VP histogram occupies right 17 %
+            domain=[0.83, 1.0],
             showgrid=False,
             showticklabels=False,
             zeroline=False,
@@ -341,7 +304,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period):
         height=580,
         template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120),            # room for POC/VAH/VAL labels
+        margin=dict(r=120),
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -661,3 +624,86 @@ elif app_mode == "🤖 Robinhood Live":
             st.subheader("📊 Live Chart")
             if not df_live.empty:
                 render_chart(df_live, [], [], [], [], fast_period, slow_period)
+
+# ============================================================
+# RULES MANAGER
+# ============================================================
+elif app_mode == "📋 Rules Manager":
+
+    RULES_FILE = "trading_rules.json"
+
+    def load_rules():
+        if os.path.exists(RULES_FILE):
+            with open(RULES_FILE, "r") as f:
+                return json.load(f)
+        return []
+
+    def save_rules(rules):
+        with open(RULES_FILE, "w") as f:
+            json.dump(rules, f, indent=2)
+
+    st.header("📋 Trading Rules Manager")
+    st.markdown("Write your trading rules here. Toggle them on/off and apply them before placing trades.")
+
+    rules = load_rules()
+
+    # ── Add new rule ──
+    st.subheader("➕ Add New Rule")
+    col_input, col_btn = st.columns([4, 1])
+    with col_input:
+        new_rule = st.text_input("Rule", placeholder="e.g. Only buy when Fast EMA > Slow EMA for 3 consecutive candles")
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Add", use_container_width=True):
+            if new_rule.strip():
+                rules.append({"rule": new_rule.strip(), "active": True})
+                save_rules(rules)
+                st.success("Rule added!")
+                st.rerun()
+
+    st.markdown("---")
+
+    # ── Display & manage rules ──
+    if not rules:
+        st.info("No rules yet. Add your first trading rule above.")
+    else:
+        st.subheader(f"📜 Your Rules ({len(rules)} total)")
+        rules_changed = False
+
+        for i, rule in enumerate(rules):
+            col1, col2, col3 = st.columns([0.6, 6, 1])
+            with col1:
+                active = st.checkbox("", value=rule["active"], key=f"rule_toggle_{i}")
+                if active != rule["active"]:
+                    rules[i]["active"] = active
+                    rules_changed = True
+            with col2:
+                status = "🟢" if rule["active"] else "🔴"
+                st.markdown(f"{status} {rule['rule']}")
+            with col3:
+                if st.button("🗑️", key=f"delete_{i}", use_container_width=True):
+                    rules.pop(i)
+                    save_rules(rules)
+                    st.rerun()
+
+        if rules_changed:
+            save_rules(rules)
+
+        st.markdown("---")
+
+        # ── Active rules summary ──
+        active_rules = [rule for rule in rules if rule["active"]]
+        st.subheader(f"✅ Active Rules ({len(active_rules)})")
+        if active_rules:
+            for rule in active_rules:
+                st.markdown(f"- {rule['rule']}")
+        else:
+            st.warning("No active rules. Toggle some on above.")
+
+        st.markdown("---")
+        st.download_button(
+            label="📥 Export Rules as JSON",
+            data=json.dumps(rules, indent=2),
+            file_name="trading_rules.json",
+            mime="application/json"
+        )
