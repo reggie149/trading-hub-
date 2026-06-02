@@ -43,6 +43,10 @@ fvg_max       = st.sidebar.slider("Max Auto-FVGs to Display", min_value=1, max_v
 show_bull_fvg = st.sidebar.toggle("Show Bullish FVGs", value=True)
 show_bear_fvg = st.sidebar.toggle("Show Bearish FVGs", value=True)
 show_filled   = st.sidebar.toggle("Show Filled FVGs", value=False)
+fvg_min_pct   = st.sidebar.slider("Min Gap Size (% of price)", min_value=0.0, max_value=2.0, value=0.05, step=0.01,
+                                   help="Ignore gaps smaller than this % of current price — filters out noise")
+fvg_max_pct   = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, max_value=20.0, value=2.0, step=0.1,
+                                   help="Ignore gaps larger than this % of current price — removes chart-swallowing boxes")
 
 # ============================================================
 # COINGECKO CRYPTO ID MAP
@@ -161,6 +165,12 @@ def find_fair_value_gaps(df):
 
         gap_top    = c3_low  if is_bullish else c1_low
         gap_bottom = c1_high if is_bullish else c3_high
+
+        # Filter by gap size as % of midpoint price — removes noise and giant boxes
+        mid_price = (gap_top + gap_bottom) / 2.0
+        gap_pct   = ((gap_top - gap_bottom) / mid_price) * 100.0
+        if gap_pct < fvg_min_pct or gap_pct > fvg_max_pct:
+            continue
         start_iso  = safe_isoformat(datetimes[i])
         fvg_type   = "bullish" if is_bullish else "bearish"
 
