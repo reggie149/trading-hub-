@@ -632,78 +632,133 @@ elif app_mode == "📋 Rules Manager":
 
     RULES_FILE = "trading_rules.json"
 
-    def load_rules():
-        if os.path.exists(RULES_FILE):
-            with open(RULES_FILE, "r") as f:
+    def load_all(file):
+        if os.path.exists(file):
+            with open(file, "r") as f:
                 return json.load(f)
-        return []
+        # Default: two starter sections
+        return [
+            {"name": "Chart Setup", "rules": []},
+            {"name": "Trading Rules", "rules": []},
+        ]
 
-    def save_rules(rules):
-        with open(RULES_FILE, "w") as f:
-            json.dump(rules, f, indent=2)
+    def save_all(data, file):
+        with open(file, "w") as f:
+            json.dump(data, f, indent=2)
 
     st.header("📋 Trading Rules Manager")
-    st.markdown("Write your trading rules here. Toggle them on/off and apply them before placing trades.")
+    st.markdown("Organize your rules into custom sections. Toggle rules on/off and add or remove sections anytime.")
 
-    rules = load_rules()
+    sections = load_all(RULES_FILE)
+    changed = False
 
-    # ── Add new rule ──
-    st.subheader("➕ Add New Rule")
-    col_input, col_btn = st.columns([4, 1])
-    with col_input:
-        new_rule = st.text_input("Rule", placeholder="e.g. Only buy when Fast EMA > Slow EMA for 3 consecutive candles")
-    with col_btn:
+    # ── Create new section ────────────────────────────────────
+    st.subheader("➕ Add New Section")
+    col_sec, col_sec_btn = st.columns([4, 1])
+    with col_sec:
+        new_section_name = st.text_input("Section name", placeholder="e.g. Risk Management, Entry Criteria...")
+    with col_sec_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Add", use_container_width=True):
-            if new_rule.strip():
-                rules.append({"rule": new_rule.strip(), "active": True})
-                save_rules(rules)
-                st.success("Rule added!")
+        if st.button("Add Section", use_container_width=True):
+            if new_section_name.strip():
+                sections.append({"name": new_section_name.strip(), "rules": []})
+                save_all(sections, RULES_FILE)
+                st.success(f"Section '{new_section_name.strip()}' created!")
                 st.rerun()
 
     st.markdown("---")
 
-    # ── Display & manage rules ──
-    if not rules:
-        st.info("No rules yet. Add your first trading rule above.")
+    # ── Render each section ───────────────────────────────────
+    if not sections:
+        st.info("No sections yet. Add your first section above.")
     else:
-        st.subheader(f"📜 Your Rules ({len(rules)} total)")
-        rules_changed = False
+        for s_idx, section in enumerate(sections):
+            total = len(section["rules"])
+            active_count = sum(1 for r in section["rules"] if r["active"])
 
-        for i, rule in enumerate(rules):
-            col1, col2, col3 = st.columns([0.6, 6, 1])
-            with col1:
-                active = st.checkbox("", value=rule["active"], key=f"rule_toggle_{i}")
-                if active != rule["active"]:
-                    rules[i]["active"] = active
-                    rules_changed = True
-            with col2:
-                status = "🟢" if rule["active"] else "🔴"
-                st.markdown(f"{status} {rule['rule']}")
-            with col3:
-                if st.button("🗑️", key=f"delete_{i}", use_container_width=True):
-                    rules.pop(i)
-                    save_rules(rules)
-                    st.rerun()
+            with st.expander(f"📁 {section['name']}  —  {active_count}/{total} active", expanded=False):
 
-        if rules_changed:
-            save_rules(rules)
+                # ── Rename section ──
+                col_rename, col_rename_btn, col_del = st.columns([4, 1, 1])
+                with col_rename:
+                    new_name = st.text_input("Rename section", value=section["name"], key=f"rename_{s_idx}")
+                with col_rename_btn:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("Rename", key=f"rename_btn_{s_idx}", use_container_width=True):
+                        if new_name.strip():
+                            sections[s_idx]["name"] = new_name.strip()
+                            save_all(sections, RULES_FILE)
+                            st.rerun()
+                with col_del:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("🗑️ Delete Section", key=f"del_sec_{s_idx}", use_container_width=True):
+                        sections.pop(s_idx)
+                        save_all(sections, RULES_FILE)
+                        st.rerun()
 
+                st.markdown("---")
+
+                # ── Add rule to this section ──
+                col_rule, col_rule_btn = st.columns([5, 1])
+                with col_rule:
+                    new_rule = st.text_input(
+                        "New rule",
+                        placeholder="e.g. Only enter when volume is above 20-period average",
+                        key=f"new_rule_{s_idx}"
+                    )
+                with col_rule_btn:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("Add Rule", key=f"add_rule_{s_idx}", use_container_width=True):
+                        if new_rule.strip():
+                            sections[s_idx]["rules"].append({"rule": new_rule.strip(), "active": True})
+                            save_all(sections, RULES_FILE)
+                            st.rerun()
+
+                # ── List rules ──
+                if not section["rules"]:
+                    st.caption("No rules in this section yet.")
+                else:
+                    for r_idx, rule in enumerate(section["rules"]):
+                        col1, col2, col3 = st.columns([0.5, 6, 1])
+                        with col1:
+                            active = st.checkbox(
+                                "", value=rule["active"],
+                                key=f"toggle_{s_idx}_{r_idx}"
+                            )
+                            if active != rule["active"]:
+                                sections[s_idx]["rules"][r_idx]["active"] = active
+                                changed = True
+                        with col2:
+                            status = "🟢" if rule["active"] else "🔴"
+                            st.markdown(f"{status} {rule['rule']}")
+                        with col3:
+                            if st.button("🗑️", key=f"del_rule_{s_idx}_{r_idx}", use_container_width=True):
+                                sections[s_idx]["rules"].pop(r_idx)
+                                save_all(sections, RULES_FILE)
+                                st.rerun()
+
+        if changed:
+            save_all(sections, RULES_FILE)
+
+        # ── Global active rules summary ───────────────────────
         st.markdown("---")
+        st.subheader("✅ All Active Rules")
+        any_active = False
+        for section in sections:
+            active_rules = [r for r in section["rules"] if r["active"]]
+            if active_rules:
+                any_active = True
+                st.markdown(f"**{section['name']}**")
+                for rule in active_rules:
+                    st.markdown(f"- {rule['rule']}")
+        if not any_active:
+            st.info("No active rules across any section.")
 
-        # ── Active rules summary ──
-        active_rules = [rule for rule in rules if rule["active"]]
-        st.subheader(f"✅ Active Rules ({len(active_rules)})")
-        if active_rules:
-            for rule in active_rules:
-                st.markdown(f"- {rule['rule']}")
-        else:
-            st.warning("No active rules. Toggle some on above.")
-
+        # ── Export ────────────────────────────────────────────
         st.markdown("---")
         st.download_button(
-            label="📥 Export Rules as JSON",
-            data=json.dumps(rules, indent=2),
+            label="📥 Export All Rules as JSON",
+            data=json.dumps(sections, indent=2),
             file_name="trading_rules.json",
             mime="application/json"
         )
