@@ -387,10 +387,6 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
                     font=dict(color="rgba(255,220,50,0.95)", size=11), xanchor="left")
 
             if show_value_area:
-                fig.add_shape(type="rect", x0=0, x1=0.82, xref="paper",
-                    y0=val, y1=vah, yref="y",
-                    fillcolor="rgba(50,200,180,0.07)",
-                    line=dict(color="rgba(50,200,180,0.45)", width=1, dash="dash"))
                 fig.add_annotation(x=1, xref="paper", y=vah, yref="y",
                     text=f" VAH {vah:,.2f}", showarrow=False,
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
