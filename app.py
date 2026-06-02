@@ -263,6 +263,25 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
         line=dict(color='#4da6ff', width=1.5),
         name=f'{slow_period} Slow EMA', xaxis="x", yaxis="y"
     ))
+
+    # ── Volume bars (per candle, green/red) ───────────────────
+    if 'Volume' in df.columns:
+        vol_colors = [
+            'rgba(0,200,100,0.6)' if float(df['Close'].iloc[i]) >= float(df['Open'].iloc[i])
+            else 'rgba(255,60,60,0.6)'
+            for i in range(len(df))
+        ]
+        fig.add_trace(go.Bar(
+            x=df['Datetime'],
+            y=df['Volume'],
+            marker_color=vol_colors,
+            name='Volume',
+            xaxis='x3',
+            yaxis='y3',
+            showlegend=True,
+            hovertemplate='%{x}<br>Volume: %{y:,.0f}<extra></extra>',
+        ))
+
     if buy_x:
         fig.add_trace(go.Scatter(
             x=buy_x, y=buy_y, mode='markers',
@@ -395,13 +414,39 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
 
     fig.update_layout(
-        xaxis=dict(rangeslider=dict(visible=False), domain=[0, 0.82]),
-        xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
-                    zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
-        yaxis=dict(side="right"),
-        height=580, template="plotly_dark",
+        # Main candlestick x-axis — top 75% of chart, left 82%
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            domain=[0, 0.82],
+            showticklabels=False,  # hide labels on main, show on volume panel
+        ),
+        # Volume profile horizontal bar x-axis — right 18%
+        xaxis2=dict(
+            domain=[0.83, 1.0], showgrid=False, showticklabels=False,
+            zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed",
+        ),
+        # Volume bar chart x-axis — same left 82%, bottom panel, linked to main
+        xaxis3=dict(
+            domain=[0, 0.82],
+            matches='x',       # syncs zoom/pan with main chart
+            showgrid=False,
+        ),
+        # Main price y-axis
+        yaxis=dict(side="right", domain=[0.25, 1.0]),
+        # Volume profile y-axis (shares price scale with main)
+        # y2 is implicitly used by xaxis2 bar — no changes needed
+        # Volume bar y-axis — bottom panel
+        yaxis3=dict(
+            domain=[0.0, 0.20],
+            showgrid=False,
+            showticklabels=False,
+            zeroline=False,
+            fixedrange=True,
+        ),
+        height=680, template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120),
+        margin=dict(r=120, b=40),
+        bargap=0,
     )
     st.plotly_chart(fig, use_container_width=True)
 
