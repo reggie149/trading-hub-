@@ -46,7 +46,7 @@ CRYPTO_MAP = {
     "ADA-USD": "cardano",
     "XRP-USD": "ripple",
     "LTC-USD": "litecoin",
-    "MATIC-USD": "matic-network",
+    "MATIC-NETWORK": "matic-network",
     "AVAX-USD": "avalanche-2",
     "DOT-USD": "polkadot",
 }
@@ -632,7 +632,7 @@ elif app_mode == "📋 Rules Manager":
 
     RULES_FILE = "trading_rules.json"
 
-   def load_all(file):
+    def load_all(file):
         if os.path.exists(file):
             with open(file, "r") as f:
                 data = json.load(f)
