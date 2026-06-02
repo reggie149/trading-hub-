@@ -43,6 +43,7 @@ fvg_max       = st.sidebar.slider("Max Auto-FVGs to Display", min_value=1, max_v
 show_bull_fvg = st.sidebar.toggle("Show Bullish FVGs", value=True)
 show_bear_fvg = st.sidebar.toggle("Show Bearish FVGs", value=True)
 show_filled   = st.sidebar.toggle("Show Filled FVGs", value=False)
+show_fvg_labels = st.sidebar.toggle("Show FVG Labels", value=True)
 fvg_min_pct   = st.sidebar.slider("Min Gap Size (% of price)", min_value=0.0, max_value=2.0, value=0.05, step=0.01,
                                    help="Ignore gaps smaller than this % of current price — filters out noise")
 fvg_max_pct   = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, max_value=20.0, value=2.0, step=0.1,
@@ -317,20 +318,21 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
                 line=dict(color=border_col, width=1 if not is_manual else 1.5, dash=dash_style),
             )
             # Midline label
-            mid = (fvg["top"] + fvg["bottom"]) / 2
-            label = ("✏️ " if is_manual else "") + ("Bull FVG" if is_bull else "Bear FVG") + (" ✓" if is_filled else "")
-            fig.add_annotation(
-                x=fvg["start_time"], xref="x",
-                y=mid, yref="y",
-                text=label,
-                showarrow=False,
-                font=dict(
-                    color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)",
-                    size=9
-                ),
-                xanchor="left",
-                bgcolor="rgba(0,0,0,0.35)",
-            )
+            if show_fvg_labels:
+                mid = (fvg["top"] + fvg["bottom"]) / 2
+                label = ("✏️ " if is_manual else "") + ("Bull FVG" if is_bull else "Bear FVG") + (" ✓" if is_filled else "")
+                fig.add_annotation(
+                    x=fvg["start_time"], xref="x",
+                    y=mid, yref="y",
+                    text=label,
+                    showarrow=False,
+                    font=dict(
+                        color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)",
+                        size=9
+                    ),
+                    xanchor="left",
+                    bgcolor="rgba(0,0,0,0.35)",
+                )
 
             # Legend entries (one per type)
             if is_filled and not filled_legend:
