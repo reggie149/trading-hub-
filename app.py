@@ -125,7 +125,6 @@ def compute_emas(df, fast, slow):
 # TIMESTAMP HELPER
 # ============================================================
 def safe_isoformat(ts):
-    """Convert any pandas Timestamp to a clean ISO string Plotly can parse."""
     t = pd.Timestamp(ts)
     try:
         t = t.tz_localize(None)
@@ -138,8 +137,6 @@ def safe_isoformat(ts):
 
 # ============================================================
 # FAIR VALUE GAP CALCULATION
-# Price-fills detection: end_time is the first candle where
-# price re-enters the gap, not always the last candle.
 # ============================================================
 def find_fair_value_gaps(df):
     fvg_list = []
@@ -167,21 +164,19 @@ def find_fair_value_gaps(df):
         gap_top    = c3_low  if is_bullish else c1_low
         gap_bottom = c1_high if is_bullish else c3_high
 
-        # Filter by gap size as % of midpoint price — removes noise and giant boxes
         mid_price = (gap_top + gap_bottom) / 2.0
         gap_pct   = ((gap_top - gap_bottom) / mid_price) * 100.0
         if gap_pct < fvg_min_pct or gap_pct > fvg_max_pct:
             continue
-        start_iso  = safe_isoformat(datetimes[i])
-        fvg_type   = "bullish" if is_bullish else "bearish"
 
-        # Scan forward to find when price fills (re-enters) the gap
-        filled      = False
-        end_iso     = last_iso
+        start_iso = safe_isoformat(datetimes[i])
+        fvg_type  = "bullish" if is_bullish else "bearish"
+
+        filled  = False
+        end_iso = last_iso
         for j in range(i + 2, len(df)):
             future_low  = float(df['Low'].iloc[j])
             future_high = float(df['High'].iloc[j])
-            # Filled when a future candle's range overlaps the gap zone
             if future_low <= gap_top and future_high >= gap_bottom:
                 end_iso = safe_isoformat(datetimes[j])
                 filled  = True
@@ -264,7 +259,6 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
         name=f'{slow_period} Slow EMA', xaxis="x", yaxis="y"
     ))
 
-    # ── Volume bars (per candle, green/red) ───────────────────
     if 'Volume' in df.columns:
         vol_colors = [
             'rgba(0,200,100,0.6)' if float(df['Close'].iloc[i]) >= float(df['Open'].iloc[i])
@@ -272,13 +266,9 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
             for i in range(len(df))
         ]
         fig.add_trace(go.Bar(
-            x=df['Datetime'],
-            y=df['Volume'],
-            marker_color=vol_colors,
-            name='Volume',
-            xaxis='x3',
-            yaxis='y3',
-            showlegend=True,
+            x=df['Datetime'], y=df['Volume'],
+            marker_color=vol_colors, name='Volume',
+            xaxis='x3', yaxis='y3', showlegend=True,
             hovertemplate='%{x}<br>Volume: %{y:,.0f}<extra></extra>',
         ))
 
@@ -295,13 +285,9 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
             name='SELL Exit', xaxis="x", yaxis="y"
         ))
 
-    # ── Fair Value Gaps ───────────────────────────────────────
     if show_fvg:
-        auto_fvgs   = find_fair_value_gaps(df)
-        auto_fvgs   = auto_fvgs[-fvg_max:]
-        manual_fvgs = extra_fvgs or []
-        all_fvgs    = auto_fvgs + manual_fvgs
-
+        auto_fvgs   = find_fair_value_gaps(df)[-fvg_max:]
+        all_fvgs    = auto_fvgs + (extra_fvgs or [])
         bull_legend = bear_legend = filled_legend = False
 
         for fvg in all_fvgs:
@@ -309,17 +295,12 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
             is_filled = fvg.get("filled", False)
             is_manual = fvg.get("source", "auto") == "manual"
 
-            if is_filled and not show_filled:
-                continue
-            if is_bull and not show_bull_fvg:
-                continue
-            if not is_bull and not show_bear_fvg:
-                continue
+            if is_filled and not show_filled: continue
+            if is_bull and not show_bull_fvg: continue
+            if not is_bull and not show_bear_fvg: continue
 
             if is_filled:
-                fill_col   = "rgba(180,180,180,0.10)"
-                border_col = "rgba(180,180,180,0.30)"
-                dash_style = "dot"
+                fill_col, border_col, dash_style = "rgba(180,180,180,0.10)", "rgba(180,180,180,0.30)", "dot"
             elif is_bull:
                 fill_col   = "rgba(0,200,100,0.15)"  if not is_manual else "rgba(0,230,120,0.22)"
                 border_col = "rgba(0,200,100,0.60)"  if not is_manual else "rgba(0,255,140,0.85)"
@@ -336,41 +317,29 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
                 fillcolor=fill_col,
                 line=dict(color=border_col, width=1 if not is_manual else 1.5, dash=dash_style),
             )
-            # Midline label
             if show_fvg_labels:
-                mid = (fvg["top"] + fvg["bottom"]) / 2
+                mid   = (fvg["top"] + fvg["bottom"]) / 2
                 label = ("✏️ " if is_manual else "") + ("Bull FVG" if is_bull else "Bear FVG") + (" ✓" if is_filled else "")
                 fig.add_annotation(
-                    x=fvg["start_time"], xref="x",
-                    y=mid, yref="y",
-                    text=label,
-                    showarrow=False,
-                    font=dict(
-                        color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)",
-                        size=9
-                    ),
-                    xanchor="left",
-                    bgcolor="rgba(0,0,0,0.35)",
+                    x=fvg["start_time"], xref="x", y=mid, yref="y",
+                    text=label, showarrow=False,
+                    font=dict(color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)", size=9),
+                    xanchor="left", bgcolor="rgba(0,0,0,0.35)",
                 )
 
-            # Legend entries (one per type)
             if is_filled and not filled_legend:
                 fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                     marker=dict(size=10, color='rgba(180,180,180,0.4)', symbol='square'),
-                    name='Filled FVG', xaxis="x", yaxis="y"))
-                filled_legend = True
+                    name='Filled FVG', xaxis="x", yaxis="y")); filled_legend = True
             elif is_bull and not bull_legend and not is_filled:
                 fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                     marker=dict(size=10, color='rgba(0,200,100,0.6)', symbol='square'),
-                    name='Bullish FVG', xaxis="x", yaxis="y"))
-                bull_legend = True
+                    name='Bullish FVG', xaxis="x", yaxis="y")); bull_legend = True
             elif not is_bull and not bear_legend and not is_filled:
                 fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                     marker=dict(size=10, color='rgba(255,60,60,0.6)', symbol='square'),
-                    name='Bearish FVG', xaxis="x", yaxis="y"))
-                bear_legend = True
+                    name='Bearish FVG', xaxis="x", yaxis="y")); bear_legend = True
 
-    # ── Volume Profile ────────────────────────────────────────
     if show_vp:
         vp = compute_volume_profile(df, bins=vp_bins)
         if vp is not None:
@@ -414,60 +383,31 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
 
     fig.update_layout(
-        # Main candlestick x-axis — top 75% of chart, left 82%
-        xaxis=dict(
-            rangeslider=dict(visible=False),
-            domain=[0, 0.82],
-            showticklabels=False,  # hide labels on main, show on volume panel
-        ),
-        # Volume profile horizontal bar x-axis — right 18%
-        xaxis2=dict(
-            domain=[0.83, 1.0], showgrid=False, showticklabels=False,
-            zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed",
-        ),
-        # Volume bar chart x-axis — same left 82%, bottom panel, linked to main
-        xaxis3=dict(
-            domain=[0, 0.82],
-            matches='x',       # syncs zoom/pan with main chart
-            showgrid=False,
-        ),
-        # Main price y-axis
+        xaxis=dict(rangeslider=dict(visible=False), domain=[0, 0.82], showticklabels=False),
+        xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
+                    zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
+        xaxis3=dict(domain=[0, 0.82], matches='x', showgrid=False),
         yaxis=dict(side="right", domain=[0.25, 1.0]),
-        # Volume profile y-axis (shares price scale with main)
-        # y2 is implicitly used by xaxis2 bar — no changes needed
-        # Volume bar y-axis — bottom panel
-        yaxis3=dict(
-            domain=[0.0, 0.20],
-            showgrid=False,
-            showticklabels=False,
-            zeroline=False,
-            fixedrange=True,
-        ),
+        yaxis3=dict(domain=[0.0, 0.20], showgrid=False, showticklabels=False, zeroline=False, fixedrange=True),
         height=680, template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120, b=40),
-        bargap=0,
+        margin=dict(r=120, b=40), bargap=0,
     )
     st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================
-# MANUAL FVG MANAGER  (session-state based)
+# MANUAL FVG MANAGER
 # ============================================================
 def manual_fvg_ui(df):
-    """Renders the add/edit/delete UI for manual FVGs and returns the list."""
     if "manual_fvgs" not in st.session_state:
         st.session_state.manual_fvgs = []
 
     st.markdown("#### ✏️ Manual Fair Value Gaps")
 
-    # Derive sensible defaults from the visible df
     price_min = float(df['Low'].min())
     price_max = float(df['High'].max())
     mid_price = (price_min + price_max) / 2.0
-    gap_size  = (price_max - price_min) * 0.01  # 1% of range as default gap
-
-    dt_min = df['Datetime'].iloc[0]
-    dt_max = df['Datetime'].iloc[-1]
+    gap_size  = (price_max - price_min) * 0.01
 
     with st.expander("➕ Add Manual FVG", expanded=False):
         c1, c2 = st.columns(2)
@@ -476,7 +416,6 @@ def manual_fvg_ui(df):
             m_top    = st.number_input("Top of gap",    value=round(mid_price + gap_size, 4), format="%.4f", key="mfvg_top")
             m_bottom = st.number_input("Bottom of gap", value=round(mid_price,             4), format="%.4f", key="mfvg_bottom")
         with c2:
-            # Let the user pick start/end as a fraction of the timeline using a slider
             total_candles = len(df)
             start_idx, end_idx = st.select_slider(
                 "Candle range (start → end)",
@@ -505,7 +444,6 @@ def manual_fvg_ui(df):
                 st.success("Manual FVG added!")
                 st.rerun()
 
-    # ── List & edit existing manual FVGs ──────────────────────
     if st.session_state.manual_fvgs:
         st.markdown("**Existing Manual FVGs**")
         for i, fvg in enumerate(st.session_state.manual_fvgs):
@@ -526,7 +464,6 @@ def manual_fvg_ui(df):
                                                  format="%.4f", key=f"edit_bot_{i}")
                 with ec2:
                     total_candles = len(df)
-                    # Find closest candle indices to stored times
                     def closest_idx(iso_str):
                         target = pd.Timestamp(iso_str)
                         diffs  = (df['Datetime'] - target).abs()
@@ -606,10 +543,10 @@ if app_mode == "📊 Backtest":
         total_return = ((final_value - initial_capital) / initial_capital) * 100
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Starting Capital",     f"${initial_capital:,.2f}")
-        col2.metric("Ending Net Worth",     f"${final_value:,.2f}")
-        col3.metric("Total Return",         f"{total_return:+.2f}%", delta_color="normal")
-        col4.metric("Total Trades Executed", len(trade_log))
+        col1.metric("Starting Capital",      f"${initial_capital:,.2f}")
+        col2.metric("Ending Net Worth",      f"${final_value:,.2f}")
+        col3.metric("Total Return",          f"{total_return:+.2f}%", delta_color="normal")
+        col4.metric("Total Trades Executed",  len(trade_log))
         st.markdown("---")
         st.subheader("📊 Interactive Market Chart & Execution Flags")
 
@@ -861,7 +798,8 @@ elif app_mode == "🤖 Robinhood Live":
                 render_chart(df_live, [], [], [], [], fast_period, slow_period, extra_fvgs=manual_fvgs)
 
 # ============================================================
-# RULES MANAGER
+# RULES MANAGER  — with editable rules, stable sections,
+#                  and Enter-to-add
 # ============================================================
 elif app_mode == "📋 Rules Manager":
 
@@ -884,22 +822,26 @@ elif app_mode == "📋 Rules Manager":
             json.dump(data, f, indent=2)
 
     st.header("📋 Trading Rules Manager")
-    st.markdown("Organize your rules into custom sections. Toggle rules on/off and add or remove sections anytime.")
+    st.markdown("Organize your rules into custom sections. Toggle, edit, or delete rules anytime.")
 
-    sections = load_all(RULES_FILE)
-    changed  = False
+    # Initialise session state from file once
+    if "rm_sections" not in st.session_state:
+        st.session_state.rm_sections = load_all(RULES_FILE)
 
+    sections = st.session_state.rm_sections
+
+    # ── Add new section ───────────────────────────────────────
     st.subheader("➕ Add New Section")
     col_sec, col_sec_btn = st.columns([4, 1])
     with col_sec:
-        new_section_name = st.text_input("Section name", placeholder="e.g. Risk Management, Entry Criteria...")
+        new_section_name = st.text_input("Section name", placeholder="e.g. Risk Management, Entry Criteria...",
+                                         key="new_section_input")
     with col_sec_btn:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Add Section", use_container_width=True):
             if new_section_name.strip():
                 sections.append({"name": new_section_name.strip(), "rules": []})
                 save_all(sections, RULES_FILE)
-                st.success(f"Section '{new_section_name.strip()}' created!")
                 st.rerun()
 
     st.markdown("---")
@@ -907,11 +849,23 @@ elif app_mode == "📋 Rules Manager":
     if not sections:
         st.info("No sections yet. Add your first section above.")
     else:
+        # Track which sections should stay expanded
+        if "rm_open" not in st.session_state:
+            st.session_state.rm_open = {}
+
         for s_idx, section in enumerate(sections):
             total        = len(section["rules"])
             active_count = sum(1 for r in section["rules"] if r["active"])
+            sec_key      = f"sec_open_{s_idx}"
 
-            with st.expander(f"📁 {section['name']}  —  {active_count}/{total} active", expanded=False):
+            # Keep section expanded after any button click
+            is_open = st.session_state.rm_open.get(sec_key, False)
+
+            with st.expander(f"📁 {section['name']}  —  {active_count}/{total} active", expanded=is_open):
+                # Mark this section as open whenever user interacts inside it
+                st.session_state.rm_open[sec_key] = True
+
+                # ── Rename / Delete section ──
                 col_rename, col_rename_btn, col_del = st.columns([4, 1, 1])
                 with col_rename:
                     new_name = st.text_input("Rename section", value=section["name"], key=f"rename_{s_idx}")
@@ -920,47 +874,80 @@ elif app_mode == "📋 Rules Manager":
                     if st.button("Rename", key=f"rename_btn_{s_idx}", use_container_width=True):
                         if new_name.strip():
                             sections[s_idx]["name"] = new_name.strip()
-                            save_all(sections, RULES_FILE); st.rerun()
+                            save_all(sections, RULES_FILE)
+                            st.rerun()
                 with col_del:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("🗑️ Delete Section", key=f"del_sec_{s_idx}", use_container_width=True):
                         sections.pop(s_idx)
-                        save_all(sections, RULES_FILE); st.rerun()
+                        st.session_state.rm_open.pop(sec_key, None)
+                        save_all(sections, RULES_FILE)
+                        st.rerun()
 
                 st.markdown("---")
 
-                col_rule, col_rule_btn = st.columns([5, 1])
-                with col_rule:
-                    new_rule = st.text_input("New rule",
-                        placeholder="e.g. Only enter when volume is above 20-period average",
-                        key=f"new_rule_{s_idx}")
-                with col_rule_btn:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("Add Rule", key=f"add_rule_{s_idx}", use_container_width=True):
-                        if new_rule.strip():
-                            sections[s_idx]["rules"].append({"rule": new_rule.strip(), "active": True})
-                            save_all(sections, RULES_FILE); st.rerun()
+                # ── Add rule — pressing Enter triggers the add ──
+                new_rule = st.text_input(
+                    "New rule (press Enter to add)",
+                    placeholder="e.g. Only enter when volume is above 20-period average",
+                    key=f"new_rule_{s_idx}"
+                )
+                # Enter submits because st.text_input reruns on Enter by default
+                if new_rule.strip() and st.session_state.get(f"new_rule_{s_idx}") == new_rule:
+                    # Only add if this is a fresh value not already saved
+                    last_key = f"last_added_{s_idx}"
+                    if st.session_state.get(last_key) != new_rule:
+                        sections[s_idx]["rules"].append({"rule": new_rule.strip(), "active": True})
+                        st.session_state[last_key] = new_rule
+                        save_all(sections, RULES_FILE)
+                        st.rerun()
 
+                st.markdown("---")
+
+                # ── List rules ──
                 if not section["rules"]:
                     st.caption("No rules in this section yet.")
                 else:
                     for r_idx, rule in enumerate(section["rules"]):
-                        col1, col2, col3 = st.columns([0.5, 6, 1])
-                        with col1:
+                        col_chk, col_rule, col_edit, col_del2 = st.columns([0.5, 5, 1, 0.8])
+
+                        with col_chk:
                             active = st.checkbox("", value=rule["active"], key=f"toggle_{s_idx}_{r_idx}")
                             if active != rule["active"]:
                                 sections[s_idx]["rules"][r_idx]["active"] = active
-                                changed = True
-                        with col2:
-                            st.markdown(f"{'🟢' if rule['active'] else '🔴'} {rule['rule']}")
-                        with col3:
+                                save_all(sections, RULES_FILE)
+
+                        with col_rule:
+                            edit_key = f"editing_{s_idx}_{r_idx}"
+                            if st.session_state.get(edit_key, False):
+                                # Show editable text input
+                                edited = st.text_input("Edit rule", value=rule["rule"],
+                                                       key=f"edit_input_{s_idx}_{r_idx}",
+                                                       label_visibility="collapsed")
+                                if st.button("💾 Save", key=f"save_rule_{s_idx}_{r_idx}"):
+                                    if edited.strip():
+                                        sections[s_idx]["rules"][r_idx]["rule"] = edited.strip()
+                                        save_all(sections, RULES_FILE)
+                                    st.session_state[edit_key] = False
+                                    st.rerun()
+                            else:
+                                status = "🟢" if rule["active"] else "🔴"
+                                st.markdown(f"{status} {rule['rule']}")
+
+                        with col_edit:
+                            edit_key = f"editing_{s_idx}_{r_idx}"
+                            label = "✏️ Cancel" if st.session_state.get(edit_key, False) else "✏️ Edit"
+                            if st.button(label, key=f"edit_btn_{s_idx}_{r_idx}", use_container_width=True):
+                                st.session_state[edit_key] = not st.session_state.get(edit_key, False)
+                                st.rerun()
+
+                        with col_del2:
                             if st.button("🗑️", key=f"del_rule_{s_idx}_{r_idx}", use_container_width=True):
                                 sections[s_idx]["rules"].pop(r_idx)
-                                save_all(sections, RULES_FILE); st.rerun()
+                                save_all(sections, RULES_FILE)
+                                st.rerun()
 
-        if changed:
-            save_all(sections, RULES_FILE)
-
+        # ── Global active rules summary ───────────────────────
         st.markdown("---")
         st.subheader("✅ All Active Rules")
         any_active = False
