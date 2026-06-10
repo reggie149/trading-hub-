@@ -672,9 +672,18 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
         scrollZoom=True,
         displayModeBar=True,
         modeBarButtonsToRemove=["select2d", "lasso2d", "autoScale2d"],
-        modeBarButtonsToAdd=["pan2d", "zoom2d", "resetScale2d"],
+        modeBarButtonsToAdd=["pan2d", "zoom2d", "resetScale2d", "resetViews"],
         displaylogo=False,
     )
+
+    # Streamlit reset button above chart — bumping the key forces a full re-render
+    # which resets pan/zoom back to the default view
+    rc1, rc2 = st.columns([8, 1])
+    with rc2:
+        if st.button("↺ Reset view", use_container_width=True, key="reset_chart_view"):
+            st.session_state["chart_render_key"] = st.session_state.get("chart_render_key", 0) + 1
+
+    chart_key = f"main_chart_{st.session_state.get('chart_render_key', 0)}"
 
     # Use on_select when R:R mode is active so clicks set price levels
     rr_mode = st.session_state.get("rr_state", {}).get("mode")
@@ -690,112 +699,119 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 st.session_state["rr_chart_key"]   = st.session_state.get("rr_chart_key", 0) + 1
                 st.rerun()
     else:
-        st.plotly_chart(fig, use_container_width=True, config=chart_config)
+        st.plotly_chart(fig, use_container_width=True, config=chart_config, key=chart_key)
 
 
 # ============================================================
 # RISK / REWARD TOOL
 # ============================================================
 def rr_tool_ui(df: pd.DataFrame) -> dict:
-    """
-    R:R tool with click-to-set and slider fine-tune.
-    - Three mode buttons: Set Entry / Set SL / Set TP
-    - Clicking the chart in that mode captures the y price
-    - Sliders appear to nudge each level ±2% after setting
-    """
     mid = float(df["Close"].iloc[-1])
     price_range = float(df["High"].max()) - float(df["Low"].min())
-    nudge_range = price_range * 0.02   # ±2% of visible range for slider
+    nudge_range = price_range * 0.02
 
     if "rr_state" not in st.session_state:
         st.session_state.rr_state = {
             "entry": mid,
             "sl":    mid * 0.98,
             "tp":    mid * 1.04,
-            "mode":  None,   # "entry" | "sl" | "tp" | None
+            "mode":  None,
         }
     if "rr_chart_key" not in st.session_state:
         st.session_state.rr_chart_key = 0
 
     state = st.session_state.rr_state
+    price_fmt = "%.2f" if mid > 10 else "%.6f"
 
     st.markdown("#### ⚖️ Risk / Reward Tool")
+    st.caption("Click a mode button, then click the chart OR type a price directly.")
 
     # ---- Mode buttons ----
     b1, b2, b3, b4 = st.columns([1, 1, 1, 1])
     with b1:
         entry_active = state["mode"] == "entry"
-        if st.button("🎯 Set Entry" if not entry_active else "🎯 Entry (active)",
+        if st.button("🎯 Set Entry" if not entry_active else "🎯 Entry ✓",
                      use_container_width=True,
                      type="primary" if entry_active else "secondary"):
             state["mode"] = None if entry_active else "entry"
             st.rerun()
     with b2:
         sl_active = state["mode"] == "sl"
-        if st.button("🔴 Set SL" if not sl_active else "🔴 SL (active)",
+        if st.button("🔴 Set SL" if not sl_active else "🔴 SL ✓",
                      use_container_width=True,
                      type="primary" if sl_active else "secondary"):
             state["mode"] = None if sl_active else "sl"
             st.rerun()
     with b3:
         tp_active = state["mode"] == "tp"
-        if st.button("🟢 Set TP" if not tp_active else "🟢 TP (active)",
+        if st.button("🟢 Set TP" if not tp_active else "🟢 TP ✓",
                      use_container_width=True,
                      type="primary" if tp_active else "secondary"):
             state["mode"] = None if tp_active else "tp"
             st.rerun()
     with b4:
-        if st.button("🔄 Reset Levels", use_container_width=True):
+        if st.button("🔄 Reset", use_container_width=True):
             st.session_state.rr_state = {
                 "entry": mid, "sl": mid * 0.98, "tp": mid * 1.04, "mode": None
             }
+            st.session_state.rr_chart_key += 1
             st.rerun()
 
     if state["mode"]:
-        st.info(f"Click on the chart to set your **{state['mode'].upper()}** price level.")
+        st.info(f"Click anywhere on the chart to set **{state['mode'].upper()}**, or type a price below.")
+
+    # ---- Direct price inputs (always visible) ----
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        new_entry = st.number_input("Entry price", value=float(state["entry"]),
+                                     format=price_fmt, key="rr_entry_input",
+                                     label_visibility="visible")
+        if new_entry != state["entry"]:
+            state["entry"] = new_entry
+            if state["mode"] == "entry":
+                state["mode"] = None
+
+    with pc2:
+        new_sl = st.number_input("Stop loss", value=float(state["sl"]),
+                                  format=price_fmt, key="rr_sl_input",
+                                  label_visibility="visible")
+        if new_sl != state["sl"]:
+            state["sl"] = new_sl
+            if state["mode"] == "sl":
+                state["mode"] = None
+
+    with pc3:
+        new_tp = st.number_input("Take profit", value=float(state["tp"]),
+                                  format=price_fmt, key="rr_tp_input",
+                                  label_visibility="visible")
+        if new_tp != state["tp"]:
+            state["tp"] = new_tp
+            if state["mode"] == "tp":
+                state["mode"] = None
 
     # ---- Fine-tune sliders ----
-    price_fmt = "%.2f" if mid > 10 else "%.6f"
-    st.markdown("**Fine-tune levels:**")
-    fc1, fc2, fc3 = st.columns(3)
-
-    with fc1:
-        new_entry = st.slider(
-            f"Entry  ({price_fmt % state['entry']})",
-            min_value=float(state["entry"] - nudge_range),
-            max_value=float(state["entry"] + nudge_range),
-            value=float(state["entry"]),
-            format=price_fmt,
-            key="rr_entry_slider"
-        )
-        state["entry"] = new_entry
-
-    with fc2:
-        new_sl = st.slider(
-            f"Stop Loss  ({price_fmt % state['sl']})",
-            min_value=float(state["sl"] - nudge_range),
-            max_value=float(state["sl"] + nudge_range),
-            value=float(state["sl"]),
-            format=price_fmt,
-            key="rr_sl_slider"
-        )
-        state["sl"] = new_sl
-
-    with fc3:
-        new_tp = st.slider(
-            f"Take Profit  ({price_fmt % state['tp']})",
-            min_value=float(state["tp"] - nudge_range),
-            max_value=float(state["tp"] + nudge_range),
-            value=float(state["tp"]),
-            format=price_fmt,
-            key="rr_tp_slider"
-        )
-        state["tp"] = new_tp
+    with st.expander("Fine-tune with sliders", expanded=False):
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            state["entry"] = st.slider(
+                "Entry", min_value=float(state["entry"] - nudge_range),
+                max_value=float(state["entry"] + nudge_range),
+                value=float(state["entry"]), format=price_fmt, key="rr_entry_slider")
+        with sc2:
+            state["sl"] = st.slider(
+                "SL", min_value=float(state["sl"] - nudge_range),
+                max_value=float(state["sl"] + nudge_range),
+                value=float(state["sl"]), format=price_fmt, key="rr_sl_slider")
+        with sc3:
+            state["tp"] = st.slider(
+                "TP", min_value=float(state["tp"] - nudge_range),
+                max_value=float(state["tp"] + nudge_range),
+                value=float(state["tp"]), format=price_fmt, key="rr_tp_slider")
 
     # ---- Metrics ----
-    entry = state["entry"]
-    sl    = state["sl"]
-    tp    = state["tp"]
+    entry  = state["entry"]
+    sl     = state["sl"]
+    tp     = state["tp"]
     risk   = abs(entry - sl)
     reward = abs(tp - entry)
     rr     = reward / risk if risk > 0 else 0
