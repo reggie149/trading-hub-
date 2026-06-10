@@ -497,50 +497,62 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
         reward = abs(tp - entry)
         ratio  = reward / risk if risk > 0 else 0
 
-        # Stop loss zone (red)
-        fig.add_hrect(
-            y0=min(entry, sl), y1=max(entry, sl),
-            fillcolor="rgba(255,60,60,0.15)",
-            line=dict(color="rgba(255,60,60,0.0)", width=0),
-            layer="below",
-        )
-        # Take profit zone (green)
-        fig.add_hrect(
-            y0=min(entry, tp), y1=max(entry, tp),
-            fillcolor="rgba(0,200,100,0.15)",
-            line=dict(color="rgba(0,200,100,0.0)", width=0),
-            layer="below",
-        )
-        # Entry line
-        fig.add_hline(y=entry, line=dict(color="rgba(255,255,255,0.8)", width=1.5, dash="dash"))
-        # SL line
-        fig.add_hline(y=sl, line=dict(color="rgba(255,60,60,0.9)", width=1.5, dash="dot"))
-        # TP line
-        fig.add_hline(y=tp, line=dict(color="rgba(0,200,100,0.9)", width=1.5, dash="dot"))
+        y_min = float(df["Low"].min())
+        y_max = float(df["High"].max())
+        y_pad = (y_max - y_min) * 0.05
 
-        # Labels on the right
+        # SL zone (red)
+        fig.add_shape(type="rect",
+            x0=df["Datetime"].iloc[0], x1=df["Datetime"].iloc[-1], xref="x",
+            y0=min(entry, sl), y1=max(entry, sl), yref="y",
+            fillcolor="rgba(255,60,60,0.18)", line=dict(width=0), layer="below")
+
+        # TP zone (green)
+        fig.add_shape(type="rect",
+            x0=df["Datetime"].iloc[0], x1=df["Datetime"].iloc[-1], xref="x",
+            y0=min(entry, tp), y1=max(entry, tp), yref="y",
+            fillcolor="rgba(0,200,100,0.18)", line=dict(width=0), layer="below")
+
+        # Entry line
+        fig.add_shape(type="line",
+            x0=df["Datetime"].iloc[0], x1=df["Datetime"].iloc[-1], xref="x",
+            y0=entry, y1=entry, yref="y",
+            line=dict(color="rgba(255,255,255,0.85)", width=1.5, dash="dash"))
+
+        # SL line
+        fig.add_shape(type="line",
+            x0=df["Datetime"].iloc[0], x1=df["Datetime"].iloc[-1], xref="x",
+            y0=sl, y1=sl, yref="y",
+            line=dict(color="rgba(255,60,60,0.95)", width=1.5, dash="dot"))
+
+        # TP line
+        fig.add_shape(type="line",
+            x0=df["Datetime"].iloc[0], x1=df["Datetime"].iloc[-1], xref="x",
+            y0=tp, y1=tp, yref="y",
+            line=dict(color="rgba(0,200,100,0.95)", width=1.5, dash="dot"))
+
+        # Labels on right
         fig.add_annotation(x=1, xref="paper", y=entry, yref="y",
-            text=f" Entry {entry:,.4f}", showarrow=False,
+            text=f" Entry {entry:,.2f}", showarrow=False,
             font=dict(color="rgba(255,255,255,0.9)", size=10), xanchor="left")
         fig.add_annotation(x=1, xref="paper", y=sl, yref="y",
-            text=f" SL {sl:,.4f}", showarrow=False,
+            text=f" SL {sl:,.2f}", showarrow=False,
             font=dict(color="rgba(255,80,80,0.9)", size=10), xanchor="left")
         fig.add_annotation(x=1, xref="paper", y=tp, yref="y",
-            text=f" TP {tp:,.4f}", showarrow=False,
+            text=f" TP {tp:,.2f}", showarrow=False,
             font=dict(color="rgba(0,220,100,0.9)", size=10), xanchor="left")
 
         # R:R label on chart
         if show_rr_on_chart:
             fig.add_annotation(
-                x=0.01, xref="paper",
-                y=tp, yref="y",
+                x=0.01, xref="paper", y=0.97, yref="paper",
                 text=f"R:R  1:{ratio:.2f}",
                 showarrow=False,
                 font=dict(color="rgba(255,220,50,0.95)", size=12),
                 bgcolor="rgba(0,0,0,0.45)",
-                borderpad=4,
-                xanchor="left",
-            )
+                borderpad=4, xanchor="left")
+
+        fig.update_layout(yaxis=dict(range=[y_min - y_pad, y_max + y_pad], side="right", domain=[0.25, 1.0]))
 
     if show_fvg:
         auto_fvgs   = find_fair_value_gaps(df)[-fvg_max:]
