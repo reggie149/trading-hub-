@@ -60,15 +60,17 @@ fvg_min_pct     = st.sidebar.slider("Min Gap Size (% of price)", min_value=0.0, 
 fvg_max_pct     = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, max_value=20.0, value=2.0, step=0.1,
                                      help="Ignore gaps larger than this % of current price — removes chart-swallowing boxes")
 
+# --- Market Hours Settings ---
+st.sidebar.markdown("---")
+st.sidebar.header("🕐 Market Hours Filter")
+show_closed_gaps = st.sidebar.toggle("Show Closed Market Annotations", value=True)
+
 # ============================================================
 # INTERVAL / PERIOD MAPS & VALIDATION
 # ============================================================
 
-# yfinance fetch interval: 4h is not native — we fetch 1h and resample
 YF_INTERVAL_MAP = {"1h": "1h", "4h": "1h", "1d": "1d"}
 
-# yfinance only serves intraday (1h) data for a rolling ~730-day window.
-# Longer periods silently return an empty DataFrame, so we cap them.
 YF_PERIOD_LIMITS = {
     "1h": ["1d", "5d", "1mo", "3mo"],
     "1d": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
@@ -76,7 +78,6 @@ YF_PERIOD_LIMITS = {
 
 
 def clamp_period(yf_inter: str, per: str) -> str:
-    """Return the longest valid yfinance period for the given interval."""
     allowed = YF_PERIOD_LIMITS.get(yf_inter)
     if allowed and per not in allowed:
         return allowed[-1]
@@ -104,7 +105,6 @@ def is_crypto(symbol: str) -> bool:
 
 
 def resample_4h(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample a 1h OHLCV DataFrame to 4h candles."""
     if df.empty:
         return df
     df = df.copy()
@@ -158,13 +158,11 @@ def get_live_price_crypto(symbol: str):
 
 @st.cache_data(ttl=300)
 def load_data(symbol: str, per: str, inter: str) -> pd.DataFrame:
-    # ---------- CRYPTO ----------
     if is_crypto(symbol):
         return load_crypto_coingecko(symbol, per, interval=inter)
 
-    # ---------- STOCKS / ETFs ----------
-    yf_inter = YF_INTERVAL_MAP.get(inter, inter)   # "4h" -> "1h"
-    safe_per = clamp_period(yf_inter, per)          # enforce valid yfinance combo
+    yf_inter = YF_INTERVAL_MAP.get(inter, inter)
+    safe_per = clamp_period(yf_inter, per)
 
     df = yf.download(symbol, period=safe_per, interval=yf_inter, progress=False)
 
@@ -177,11 +175,9 @@ def load_data(symbol: str, per: str, inter: str) -> pd.DataFrame:
     df.index.name = "Datetime"
     df.reset_index(inplace=True)
 
-    # Ensure Datetime column is tz-naive for consistent downstream handling
     if pd.api.types.is_datetime64tz_dtype(df["Datetime"]):
         df["Datetime"] = df["Datetime"].dt.tz_convert(None)
 
-    # Resample 1h -> 4h for stocks (crypto handles this inside load_crypto_coingecko)
     if inter == "4h":
         df = resample_4h(df)
 
@@ -211,7 +207,6 @@ def compute_emas(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
 # PERIOD-CLAMPING WARNING HELPER
 # ============================================================
 def warn_if_clamped(symbol: str, inter: str, requested_per: str) -> None:
-    """Show a sidebar/inline warning when the period was silently clamped."""
     if is_crypto(symbol):
         return
     yf_inter = YF_INTERVAL_MAP.get(inter, inter)
@@ -236,6 +231,72 @@ def safe_isoformat(ts) -> str:
         except Exception:
             pass
     return t.isoformat()
+
+
+# ============================================================
+# TRADING HOURS FILTER
+# ============================================================
+
+# NYSE / NASDAQ regular session in UTC: 14:30 – 21:00
+MARKET_OPEN_UTC  = 14 * 60 + 30   # minutes since midnight
+MARKET_CLOSE_UTC = 21 * 60 + 0
+
+
+def filter_trading_hours(df: pd.DataFrame, symbol: str, interval: str) -> pd.DataFrame:
+    """
+    Drop rows that fall outside regular NYSE/NASDAQ trading hours (14:30–21:00 UTC).
+    - Crypto (24/7) and daily candles are returned unchanged.
+    - 1h and 4h stock/ETF data is filtered to session hours only.
+    """
+    if interval == "1d" or is_crypto(symbol):
+        return df
+    if df.empty:
+        return df
+    minutes = df["Datetime"].dt.hour * 60 + df["Datetime"].dt.minute
+    mask = (minutes >= MARKET_OPEN_UTC) & (minutes < MARKET_CLOSE_UTC)
+    return df[mask].reset_index(drop=True)
+
+
+def get_closed_gaps(df_raw: pd.DataFrame, df_filtered: pd.DataFrame,
+                    symbol: str, interval: str) -> list:
+    """
+    Compare raw vs filtered DataFrames to find contiguous market-closed blocks.
+    Returns a list of dicts: { x0, x1, label } for use as chart annotations.
+    Returns [] for crypto or daily intervals.
+    """
+    if interval == "1d" or is_crypto(symbol):
+        return []
+    if df_raw.empty or df_filtered.empty:
+        return []
+
+    raw_times      = set(df_raw["Datetime"].astype(str))
+    filtered_times = set(df_filtered["Datetime"].astype(str))
+    removed        = sorted(raw_times - filtered_times)
+
+    if not removed:
+        return []
+
+    delta_map = {"1h": pd.Timedelta("1h"), "4h": pd.Timedelta("4h")}
+    candle_td = delta_map.get(interval, pd.Timedelta("1h"))
+
+    gaps        = []
+    block_start = removed[0]
+    prev        = removed[0]
+
+    for ts in removed[1:]:
+        if pd.Timestamp(ts) - pd.Timestamp(prev) > candle_td * 1.5:
+            gaps.append((block_start, prev))
+            block_start = ts
+        prev = ts
+    gaps.append((block_start, prev))
+
+    result = []
+    for x0_str, x1_str in gaps:
+        t0 = pd.Timestamp(x0_str)
+        t1 = pd.Timestamp(x1_str) + candle_td
+        label = f"Market closed  {t0.strftime('%H:%M')}–{t1.strftime('%H:%M')} UTC"
+        result.append({"x0": t0.isoformat(), "x1": t1.isoformat(), "label": label})
+    return result
 
 
 # ============================================================
@@ -345,7 +406,8 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 40):
 # ============================================================
 # CHART RENDERING
 # ============================================================
-def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, extra_fvgs=None):
+def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
+                 extra_fvgs=None, closed_gaps=None):
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
@@ -389,6 +451,30 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
             marker=dict(symbol="triangle-down", size=12, color="red", line=dict(width=2, color="black")),
             name="SELL Exit", xaxis="x", yaxis="y"
         ))
+
+    # ---- MARKET CLOSED ANNOTATIONS ----
+    if show_closed_gaps and closed_gaps:
+        for gap in closed_gaps:
+            # Subtle shaded column behind the price pane
+            fig.add_vrect(
+                x0=gap["x0"], x1=gap["x1"],
+                fillcolor="rgba(120,120,160,0.07)",
+                line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
+                layer="below",
+            )
+            # Small label pinned just above the chart area
+            fig.add_annotation(
+                x=gap["x0"],
+                xref="x",
+                y=1.01,
+                yref="paper",
+                text=gap["label"],
+                showarrow=False,
+                font=dict(size=9, color="rgba(180,180,210,0.85)"),
+                xanchor="left",
+                bgcolor="rgba(30,30,50,0.50)",
+                borderpad=3,
+            )
 
     if show_fvg:
         auto_fvgs   = find_fair_value_gaps(df)[-fvg_max:]
@@ -496,7 +582,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
         yaxis3=dict(domain=[0.0, 0.20], showgrid=False, showticklabels=False, zeroline=False, fixedrange=True),
         height=680, template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120, b=40), bargap=0,
+        margin=dict(r=120, b=40, t=40), bargap=0,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -624,7 +710,10 @@ if app_mode == "📊 Backtest":
         st.error("No data found. For crypto use tickers like BTC-USD, ETH-USD, SOL-USD. For stocks use AAPL, TSLA etc.")
         st.info("Supported crypto: " + ", ".join(CRYPTO_MAP.keys()))
     else:
-        df = compute_emas(df_raw, fast_period, slow_period)
+        df_filtered = filter_trading_hours(df_raw, ticker, time_frame)
+        closed_gaps = get_closed_gaps(df_raw, df_filtered, ticker, time_frame)
+        df = compute_emas(df_filtered, fast_period, slow_period)
+
         cash, position, is_invested = initial_capital, 0.0, False
         trade_log = []
         buy_signals_x, buy_signals_y   = [], []
@@ -660,7 +749,7 @@ if app_mode == "📊 Backtest":
 
         manual_fvgs = manual_fvg_ui(df)
         render_chart(df, buy_signals_x, buy_signals_y, sell_signals_x, sell_signals_y,
-                     fast_period, slow_period, extra_fvgs=manual_fvgs)
+                     fast_period, slow_period, extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
 
         st.markdown("---")
         st.subheader("📜 Complete Trade Ledger Logs")
@@ -705,7 +794,10 @@ elif app_mode == "🧪 Simulation":
         live_price = get_live_price(ticker)
         if live_price:
             st.metric("Current Live Price", f"${live_price:,.2f}")
-            df_chart = compute_emas(load_data(ticker, "1mo", time_frame), fast_period, slow_period)
+            df_raw_sim   = load_data(ticker, "1mo", time_frame)
+            df_filt_sim  = filter_trading_hours(df_raw_sim, ticker, time_frame)
+            closed_gaps  = get_closed_gaps(df_raw_sim, df_filt_sim, ticker, time_frame)
+            df_chart     = compute_emas(df_filt_sim, fast_period, slow_period)
             warn_if_clamped(ticker, time_frame, "1mo")
             if auto_trade and len(df_chart) > slow_period:
                 fast_now, slow_now = float(df_chart["Fast_EMA"].iloc[-1]), float(df_chart["Slow_EMA"].iloc[-1])
@@ -731,13 +823,15 @@ elif app_mode == "🧪 Simulation":
                 manual_fvgs = manual_fvg_ui(df_chart)
                 render_chart(df_chart, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
                              st.session_state.sim_sell_x, st.session_state.sim_sell_y,
-                             fast_period, slow_period, extra_fvgs=manual_fvgs)
+                             fast_period, slow_period, extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
         else:
             st.error("Could not fetch live price. Check ticker symbol.")
 
     else:
         st.subheader("🔁 Historical Data Replay")
-        df_replay = compute_emas(load_data(ticker, timeline, time_frame), fast_period, slow_period)
+        df_raw_rep  = load_data(ticker, timeline, time_frame)
+        df_filt_rep = filter_trading_hours(df_raw_rep, ticker, time_frame)
+        df_replay   = compute_emas(df_filt_rep, fast_period, slow_period)
         warn_if_clamped(ticker, time_frame, timeline)
 
         if "replay_idx" not in st.session_state:
@@ -757,6 +851,10 @@ elif app_mode == "🧪 Simulation":
         current_price = float(df_visible["Close"].iloc[-1])
         timestamp     = df_visible["Datetime"].iloc[-1]
         st.metric("Current Replay Price", f"${current_price:,.2f}", f"Candle {idx} of {len(df_replay)}")
+
+        # Recompute gaps for the visible slice
+        df_raw_vis   = df_raw_rep.iloc[:idx+1].copy() if not df_raw_rep.empty else pd.DataFrame()
+        closed_gaps  = get_closed_gaps(df_raw_vis, df_visible, ticker, time_frame)
 
         if auto_trade and len(df_visible) > slow_period:
             fast_now, slow_now = float(df_visible["Fast_EMA"].iloc[-1]), float(df_visible["Slow_EMA"].iloc[-1])
@@ -781,7 +879,7 @@ elif app_mode == "🧪 Simulation":
         manual_fvgs = manual_fvg_ui(df_visible)
         render_chart(df_visible, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
                      st.session_state.sim_sell_x, st.session_state.sim_sell_y,
-                     fast_period, slow_period, extra_fvgs=manual_fvgs)
+                     fast_period, slow_period, extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
 
     st.markdown("---")
     live_val     = get_live_price(ticker) or 0
@@ -855,7 +953,10 @@ elif app_mode == "🤖 Robinhood Live":
             if live_price:
                 st.metric(f"Live Price: {ticker}", f"${live_price:,.2f}")
 
-            df_live  = compute_emas(load_data(ticker, "1mo", time_frame), fast_period, slow_period)
+            df_raw_rh   = load_data(ticker, "1mo", time_frame)
+            df_filt_rh  = filter_trading_hours(df_raw_rh, ticker, time_frame)
+            closed_gaps = get_closed_gaps(df_raw_rh, df_filt_rh, ticker, time_frame)
+            df_live     = compute_emas(df_filt_rh, fast_period, slow_period)
             warn_if_clamped(ticker, time_frame, "1mo")
             fast_now = float(df_live["Fast_EMA"].iloc[-1])
             slow_now = float(df_live["Slow_EMA"].iloc[-1])
@@ -909,7 +1010,8 @@ elif app_mode == "🤖 Robinhood Live":
             st.subheader("📊 Live Chart")
             if not df_live.empty:
                 manual_fvgs = manual_fvg_ui(df_live)
-                render_chart(df_live, [], [], [], [], fast_period, slow_period, extra_fvgs=manual_fvgs)
+                render_chart(df_live, [], [], [], [], fast_period, slow_period,
+                             extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
 
 
 # ============================================================
