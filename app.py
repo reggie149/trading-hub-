@@ -29,9 +29,6 @@ time_frame = st.sidebar.radio(
     horizontal=True,
 )
 
-# yfinance does not support a native 4h interval — warn the user and map it
-YF_INTERVAL_MAP = {"1h": "1h", "4h": "1d", "1d": "1d"}
-
 st.sidebar.markdown("---")
 initial_capital = st.sidebar.number_input("Starting Capital ($)", value=10000.00, step=1000.00)
 fast_period = st.sidebar.slider("Fast EMA Period", min_value=2, max_value=50, value=12)
@@ -64,6 +61,29 @@ fvg_max_pct     = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, 
                                      help="Ignore gaps larger than this % of current price — removes chart-swallowing boxes")
 
 # ============================================================
+# INTERVAL / PERIOD MAPS & VALIDATION
+# ============================================================
+
+# yfinance fetch interval: 4h is not native — we fetch 1h and resample
+YF_INTERVAL_MAP = {"1h": "1h", "4h": "1h", "1d": "1d"}
+
+# yfinance only serves intraday (1h) data for a rolling ~730-day window.
+# Longer periods silently return an empty DataFrame, so we cap them.
+YF_PERIOD_LIMITS = {
+    "1h": ["1d", "5d", "1mo", "3mo"],
+    "1d": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+}
+
+
+def clamp_period(yf_inter: str, per: str) -> str:
+    """Return the longest valid yfinance period for the given interval."""
+    allowed = YF_PERIOD_LIMITS.get(yf_inter)
+    if allowed and per not in allowed:
+        return allowed[-1]
+    return per
+
+
+# ============================================================
 # COINGECKO CRYPTO ID MAP
 # ============================================================
 CRYPTO_MAP = {
@@ -78,11 +98,12 @@ PERIOD_DAYS = {
     "6mo": 180, "1y": 365, "2y": 730, "5y": 1825,
 }
 
-def is_crypto(symbol):
+
+def is_crypto(symbol: str) -> bool:
     return symbol.upper() in CRYPTO_MAP or symbol.upper().endswith("-USD")
 
 
-def resample_4h(df):
+def resample_4h(df: pd.DataFrame) -> pd.DataFrame:
     """Resample a 1h OHLCV DataFrame to 4h candles."""
     if df.empty:
         return df
@@ -94,7 +115,7 @@ def resample_4h(df):
     return df
 
 
-def load_crypto_coingecko(symbol, period, interval="1h"):
+def load_crypto_coingecko(symbol: str, period: str, interval: str = "1h") -> pd.DataFrame:
     coin_id = CRYPTO_MAP.get(symbol.upper())
     if not coin_id:
         return pd.DataFrame()
@@ -116,36 +137,58 @@ def load_crypto_coingecko(symbol, period, interval="1h"):
             ohlc_dict = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
             df = df.resample("1D").agg(ohlc_dict).dropna(subset=["Close"]).reset_index()
         return df
-    except:
+    except Exception:
         return pd.DataFrame()
 
 
-def get_live_price_crypto(symbol):
+def get_live_price_crypto(symbol: str):
     coin_id = CRYPTO_MAP.get(symbol.upper())
     if not coin_id:
         return None
     try:
-        resp = requests.get("https://api.coingecko.com/api/v3/simple/price",
-                            params={"ids": coin_id, "vs_currencies": "usd"}, timeout=5)
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": coin_id, "vs_currencies": "usd"},
+            timeout=5,
+        )
         return float(resp.json()[coin_id]["usd"])
-    except:
+    except Exception:
         return None
 
 
 @st.cache_data(ttl=300)
-def load_data(symbol, per, inter):
+def load_data(symbol: str, per: str, inter: str) -> pd.DataFrame:
+    # ---------- CRYPTO ----------
     if is_crypto(symbol):
         return load_crypto_coingecko(symbol, per, interval=inter)
 
-    yf_inter = YF_INTERVAL_MAP.get(inter, inter)
-    df = yf.download(symbol, period=per, interval=yf_inter, progress=False)
+    # ---------- STOCKS / ETFs ----------
+    yf_inter = YF_INTERVAL_MAP.get(inter, inter)   # "4h" -> "1h"
+    safe_per = clamp_period(yf_inter, per)          # enforce valid yfinance combo
+
+    df = yf.download(symbol, period=safe_per, interval=yf_inter, progress=False)
+
+    if df.empty:
+        return pd.DataFrame()
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
     df.index.name = "Datetime"
     df.reset_index(inplace=True)
+
+    # Ensure Datetime column is tz-naive for consistent downstream handling
+    if pd.api.types.is_datetime64tz_dtype(df["Datetime"]):
+        df["Datetime"] = df["Datetime"].dt.tz_convert(None)
+
+    # Resample 1h -> 4h for stocks (crypto handles this inside load_crypto_coingecko)
+    if inter == "4h":
+        df = resample_4h(df)
+
     return df
 
-def get_live_price(symbol):
+
+def get_live_price(symbol: str):
     if is_crypto(symbol):
         return get_live_price_crypto(symbol)
     try:
@@ -153,20 +196,37 @@ def get_live_price(symbol):
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         return float(data["Close"].iloc[-1])
-    except:
+    except Exception:
         return None
 
 
-def compute_emas(df, fast, slow):
+def compute_emas(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
     df = df.copy()
     df["Fast_EMA"] = df["Close"].ewm(span=fast, adjust=False).mean()
     df["Slow_EMA"] = df["Close"].ewm(span=slow, adjust=False).mean()
     return df
 
+
+# ============================================================
+# PERIOD-CLAMPING WARNING HELPER
+# ============================================================
+def warn_if_clamped(symbol: str, inter: str, requested_per: str) -> None:
+    """Show a sidebar/inline warning when the period was silently clamped."""
+    if is_crypto(symbol):
+        return
+    yf_inter = YF_INTERVAL_MAP.get(inter, inter)
+    safe = clamp_period(yf_inter, requested_per)
+    if safe != requested_per:
+        st.warning(
+            f"⚠️ yfinance only supports **{inter}** data up to **{safe}**. "
+            f"History period auto-adjusted from `{requested_per}` → `{safe}`."
+        )
+
+
 # ============================================================
 # TIMESTAMP HELPER
 # ============================================================
-def safe_isoformat(ts):
+def safe_isoformat(ts) -> str:
     t = pd.Timestamp(ts)
     try:
         t = t.tz_localize(None)
@@ -177,10 +237,11 @@ def safe_isoformat(ts):
             pass
     return t.isoformat()
 
+
 # ============================================================
 # FAIR VALUE GAP CALCULATION
 # ============================================================
-def find_fair_value_gaps(df):
+def find_fair_value_gaps(df: pd.DataFrame) -> list:
     fvg_list = []
     if len(df) < 3:
         return fvg_list
@@ -236,10 +297,11 @@ def find_fair_value_gaps(df):
 
     return fvg_list
 
+
 # ============================================================
 # VOLUME PROFILE
 # ============================================================
-def compute_volume_profile(df, bins=40):
+def compute_volume_profile(df: pd.DataFrame, bins: int = 40):
     if df.empty or "Volume" not in df.columns:
         return None
     price_min = df["Low"].min()
@@ -278,6 +340,7 @@ def compute_volume_profile(df, bins=40):
         "vah_price":    bin_centres[hi_ptr],
         "val_price":    bin_centres[lo_ptr],
     }
+
 
 # ============================================================
 # CHART RENDERING
@@ -437,10 +500,11 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
     )
     st.plotly_chart(fig, use_container_width=True)
 
+
 # ============================================================
 # MANUAL FVG MANAGER
 # ============================================================
-def manual_fvg_ui(df):
+def manual_fvg_ui(df: pd.DataFrame) -> list:
     if "manual_fvgs" not in st.session_state:
         st.session_state.manual_fvgs = []
 
@@ -548,11 +612,13 @@ def manual_fvg_ui(df):
 
     return st.session_state.manual_fvgs
 
+
 # ============================================================
 # BACKTEST MODE
 # ============================================================
 if app_mode == "📊 Backtest":
     df_raw = load_data(ticker, timeline, time_frame)
+    warn_if_clamped(ticker, time_frame, timeline)
 
     if df_raw.empty:
         st.error("No data found. For crypto use tickers like BTC-USD, ETH-USD, SOL-USD. For stocks use AAPL, TSLA etc.")
@@ -603,6 +669,7 @@ if app_mode == "📊 Backtest":
         else:
             st.info("No trades executed. Try tightening your EMA horizons.")
 
+
 # ============================================================
 # SIMULATION MODE
 # ============================================================
@@ -639,6 +706,7 @@ elif app_mode == "🧪 Simulation":
         if live_price:
             st.metric("Current Live Price", f"${live_price:,.2f}")
             df_chart = compute_emas(load_data(ticker, "1mo", time_frame), fast_period, slow_period)
+            warn_if_clamped(ticker, time_frame, "1mo")
             if auto_trade and len(df_chart) > slow_period:
                 fast_now, slow_now = float(df_chart["Fast_EMA"].iloc[-1]), float(df_chart["Slow_EMA"].iloc[-1])
                 now = datetime.now()
@@ -670,6 +738,8 @@ elif app_mode == "🧪 Simulation":
     else:
         st.subheader("🔁 Historical Data Replay")
         df_replay = compute_emas(load_data(ticker, timeline, time_frame), fast_period, slow_period)
+        warn_if_clamped(ticker, time_frame, timeline)
+
         if "replay_idx" not in st.session_state:
             st.session_state.replay_idx = slow_period
 
@@ -725,6 +795,7 @@ elif app_mode == "🧪 Simulation":
     if st.session_state.sim_trades:
         st.subheader("📜 Simulation Trade Log")
         st.dataframe(pd.DataFrame(st.session_state.sim_trades), use_container_width=True)
+
 
 # ============================================================
 # ROBINHOOD LIVE
@@ -785,6 +856,7 @@ elif app_mode == "🤖 Robinhood Live":
                 st.metric(f"Live Price: {ticker}", f"${live_price:,.2f}")
 
             df_live  = compute_emas(load_data(ticker, "1mo", time_frame), fast_period, slow_period)
+            warn_if_clamped(ticker, time_frame, "1mo")
             fast_now = float(df_live["Fast_EMA"].iloc[-1])
             slow_now = float(df_live["Slow_EMA"].iloc[-1])
             signal   = "🟢 BUY Signal" if fast_now > slow_now else "🔴 SELL Signal"
@@ -838,6 +910,7 @@ elif app_mode == "🤖 Robinhood Live":
             if not df_live.empty:
                 manual_fvgs = manual_fvg_ui(df_live)
                 render_chart(df_live, [], [], [], [], fast_period, slow_period, extra_fvgs=manual_fvgs)
+
 
 # ============================================================
 # RULES MANAGER
