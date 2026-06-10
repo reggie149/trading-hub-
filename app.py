@@ -64,6 +64,7 @@ fvg_max_pct     = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, 
 st.sidebar.markdown("---")
 st.sidebar.header("🕐 Market Hours Filter")
 show_closed_gaps = st.sidebar.toggle("Show Closed Market Annotations", value=True)
+remove_time_gaps = st.sidebar.toggle("Remove Time Gaps (Categorical Axis)", value=False)
 
 # --- Risk / Reward Settings ---
 st.sidebar.markdown("---")
@@ -416,20 +417,48 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 40):
 # ============================================================
 def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                  extra_fvgs=None, closed_gaps=None):
+
+    use_cat = remove_time_gaps and not is_crypto(ticker) and time_frame != "1d"
+
+    if use_cat:
+        idx_arr  = list(range(len(df)))
+        dt_str   = df["Datetime"].dt.strftime("%b %d %H:%M").tolist()
+        dt_index = pd.DatetimeIndex(df["Datetime"])
+        def ts_to_idx(ts):
+            try:
+                pos = dt_index.get_indexer([pd.Timestamp(ts)], method="nearest")[0]
+                return int(pos)
+            except Exception:
+                return 0
+        x_candle = idx_arr
+        x_vol    = idx_arr
+        buy_x_plot  = [ts_to_idx(t) for t in buy_x]
+        sell_x_plot = [ts_to_idx(t) for t in sell_x]
+        tick_step = max(1, len(df) // 10)
+        tickvals  = idx_arr[::tick_step]
+        ticktext  = [dt_str[i] for i in tickvals]
+    else:
+        x_candle    = df["Datetime"]
+        x_vol       = df["Datetime"]
+        buy_x_plot  = buy_x
+        sell_x_plot = sell_x
+        tickvals = ticktext = None
+
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
-        x=df["Datetime"], open=df["Open"], high=df["High"],
+        x=x_candle, open=df["Open"], high=df["High"],
         low=df["Low"], close=df["Close"],
-        name="Price Action", xaxis="x", yaxis="y"
+        name="Price Action", xaxis="x", yaxis="y",
+        text=df["Datetime"].astype(str) if use_cat else None,
     ))
     fig.add_trace(go.Scatter(
-        x=df["Datetime"], y=df["Fast_EMA"],
+        x=x_candle, y=df["Fast_EMA"],
         line=dict(color="orange", width=1.5),
         name=f"{fast_period} Fast EMA", xaxis="x", yaxis="y"
     ))
     fig.add_trace(go.Scatter(
-        x=df["Datetime"], y=df["Slow_EMA"],
+        x=x_candle, y=df["Slow_EMA"],
         line=dict(color="#4da6ff", width=1.5),
         name=f"{slow_period} Slow EMA", xaxis="x", yaxis="y"
     ))
@@ -441,21 +470,21 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
             for i in range(len(df))
         ]
         fig.add_trace(go.Bar(
-            x=df["Datetime"], y=df["Volume"],
+            x=x_vol, y=df["Volume"],
             marker_color=vol_colors, name="Volume",
             xaxis="x3", yaxis="y3", showlegend=True,
             hovertemplate="%{x}<br>Volume: %{y:,.0f}<extra></extra>",
         ))
 
-    if buy_x:
+    if buy_x_plot:
         fig.add_trace(go.Scatter(
-            x=buy_x, y=buy_y, mode="markers",
+            x=buy_x_plot, y=buy_y, mode="markers",
             marker=dict(symbol="triangle-up", size=12, color="green", line=dict(width=2, color="black")),
             name="BUY Entry", xaxis="x", yaxis="y"
         ))
-    if sell_x:
+    if sell_x_plot:
         fig.add_trace(go.Scatter(
-            x=sell_x, y=sell_y, mode="markers",
+            x=sell_x_plot, y=sell_y, mode="markers",
             marker=dict(symbol="triangle-down", size=12, color="red", line=dict(width=2, color="black")),
             name="SELL Exit", xaxis="x", yaxis="y"
         ))
@@ -463,26 +492,26 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
     # ---- MARKET CLOSED ANNOTATIONS ----
     if show_closed_gaps and closed_gaps:
         for gap in closed_gaps:
-            # Subtle shaded column behind the price pane
-            fig.add_vrect(
-                x0=gap["x0"], x1=gap["x1"],
-                fillcolor="rgba(120,120,160,0.07)",
-                line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
-                layer="below",
-            )
-            # Small label pinned just above the chart area
-            fig.add_annotation(
-                x=gap["x0"],
-                xref="x",
-                y=1.01,
-                yref="paper",
-                text=gap["label"],
-                showarrow=False,
-                font=dict(size=9, color="rgba(180,180,210,0.85)"),
-                xanchor="left",
-                bgcolor="rgba(30,30,50,0.50)",
-                borderpad=3,
-            )
+            if use_cat:
+                x_pos = ts_to_idx(gap["x0"])
+                fig.add_vline(x=x_pos,
+                    line=dict(color="rgba(120,120,160,0.35)", width=1, dash="dot"), layer="below")
+                fig.add_annotation(x=x_pos, xref="x", y=1.01, yref="paper",
+                    text=gap["label"], showarrow=False,
+                    font=dict(size=9, color="rgba(180,180,210,0.85)"),
+                    xanchor="left", bgcolor="rgba(30,30,50,0.55)", borderpad=3)
+            else:
+                fig.add_vrect(
+                    x0=gap["x0"], x1=gap["x1"],
+                    fillcolor="rgba(120,120,160,0.07)",
+                    line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
+                    layer="below",
+                )
+                fig.add_annotation(
+                    x=gap["x0"], xref="x", y=1.01, yref="paper",
+                    text=gap["label"], showarrow=False,
+                    font=dict(size=9, color="rgba(180,180,210,0.85)"),
+                    xanchor="left", bgcolor="rgba(30,30,50,0.50)", borderpad=3)
 
     # ---- RISK / REWARD ZONES ----
     if show_rr and "rr_state" in st.session_state:
@@ -579,10 +608,13 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 border_col = "rgba(255,60,60,0.60)"  if not is_manual else "rgba(255,100,100,0.85)"
                 dash_style = "solid"
 
+            x0_plot = ts_to_idx(fvg["start_time"]) if use_cat else fvg["start_time"]
+            x1_plot = ts_to_idx(fvg["end_time"])   if use_cat else fvg["end_time"]
+
             fig.add_shape(
                 type="rect",
-                x0=fvg["start_time"], x1=fvg["end_time"], xref="x",
-                y0=fvg["bottom"],     y1=fvg["top"],       yref="y",
+                x0=x0_plot, x1=x1_plot, xref="x",
+                y0=fvg["bottom"], y1=fvg["top"], yref="y",
                 fillcolor=fill_col,
                 line=dict(color=border_col, width=1 if not is_manual else 1.5, dash=dash_style),
             )
@@ -590,7 +622,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 mid   = (fvg["top"] + fvg["bottom"]) / 2
                 label = ("✏️ " if is_manual else "") + ("Bull FVG" if is_bull else "Bear FVG") + (" ✓" if is_filled else "")
                 fig.add_annotation(
-                    x=fvg["start_time"], xref="x", y=mid, yref="y",
+                    x=x0_plot, xref="x", y=mid, yref="y",
                     text=label, showarrow=False,
                     font=dict(color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)", size=9),
                     xanchor="left", bgcolor="rgba(0,0,0,0.35)",
@@ -651,12 +683,18 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                     text=f" VAL {val:,.2f}", showarrow=False,
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
 
+    xaxis_cfg = dict(
+        rangeslider=dict(visible=True, thickness=0.04),
+        domain=[0, 0.82],
+        showticklabels=True,
+    )
+    if use_cat and tickvals is not None:
+        xaxis_cfg.update(
+            tickmode="array", tickvals=tickvals, ticktext=ticktext,
+            tickangle=-45, tickfont=dict(size=10))
+
     fig.update_layout(
-        xaxis=dict(
-            rangeslider=dict(visible=True, thickness=0.04),
-            domain=[0, 0.82],
-            showticklabels=True,
-        ),
+        xaxis=xaxis_cfg,
         xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
                     zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
         xaxis3=dict(domain=[0, 0.82], matches="x", showgrid=False),
@@ -727,30 +765,32 @@ def rr_tool_ui(df: pd.DataFrame) -> dict:
     st.caption("Click a mode button, then click the chart OR type a price directly.")
 
     # ---- Mode buttons ----
+    # Use app_mode in key to avoid duplicate ID when rr_tool_ui is called from multiple modes
+    _k = app_mode.replace(" ", "_")
     b1, b2, b3, b4 = st.columns([1, 1, 1, 1])
     with b1:
         entry_active = state["mode"] == "entry"
         if st.button("🎯 Set Entry" if not entry_active else "🎯 Entry ✓",
-                     use_container_width=True,
+                     use_container_width=True, key=f"rr_btn_entry_{_k}",
                      type="primary" if entry_active else "secondary"):
             state["mode"] = None if entry_active else "entry"
             st.rerun()
     with b2:
         sl_active = state["mode"] == "sl"
         if st.button("🔴 Set SL" if not sl_active else "🔴 SL ✓",
-                     use_container_width=True,
+                     use_container_width=True, key=f"rr_btn_sl_{_k}",
                      type="primary" if sl_active else "secondary"):
             state["mode"] = None if sl_active else "sl"
             st.rerun()
     with b3:
         tp_active = state["mode"] == "tp"
         if st.button("🟢 Set TP" if not tp_active else "🟢 TP ✓",
-                     use_container_width=True,
+                     use_container_width=True, key=f"rr_btn_tp_{_k}",
                      type="primary" if tp_active else "secondary"):
             state["mode"] = None if tp_active else "tp"
             st.rerun()
     with b4:
-        if st.button("🔄 Reset", use_container_width=True):
+        if st.button("🔄 Reset", use_container_width=True, key=f"rr_btn_reset_{_k}"):
             st.session_state.rr_state = {
                 "entry": mid, "sl": mid * 0.98, "tp": mid * 1.04, "mode": None
             }
@@ -764,7 +804,7 @@ def rr_tool_ui(df: pd.DataFrame) -> dict:
     pc1, pc2, pc3 = st.columns(3)
     with pc1:
         new_entry = st.number_input("Entry price", value=float(state["entry"]),
-                                     format=price_fmt, key="rr_entry_input",
+                                     format=price_fmt, key=f"rr_entry_input_{_k}",
                                      label_visibility="visible")
         if new_entry != state["entry"]:
             state["entry"] = new_entry
@@ -773,7 +813,7 @@ def rr_tool_ui(df: pd.DataFrame) -> dict:
 
     with pc2:
         new_sl = st.number_input("Stop loss", value=float(state["sl"]),
-                                  format=price_fmt, key="rr_sl_input",
+                                  format=price_fmt, key=f"rr_sl_input_{_k}",
                                   label_visibility="visible")
         if new_sl != state["sl"]:
             state["sl"] = new_sl
@@ -782,7 +822,7 @@ def rr_tool_ui(df: pd.DataFrame) -> dict:
 
     with pc3:
         new_tp = st.number_input("Take profit", value=float(state["tp"]),
-                                  format=price_fmt, key="rr_tp_input",
+                                  format=price_fmt, key=f"rr_tp_input_{_k}",
                                   label_visibility="visible")
         if new_tp != state["tp"]:
             state["tp"] = new_tp
@@ -796,17 +836,17 @@ def rr_tool_ui(df: pd.DataFrame) -> dict:
             state["entry"] = st.slider(
                 "Entry", min_value=float(state["entry"] - nudge_range),
                 max_value=float(state["entry"] + nudge_range),
-                value=float(state["entry"]), format=price_fmt, key="rr_entry_slider")
+                value=float(state["entry"]), format=price_fmt, key=f"rr_entry_slider_{_k}")
         with sc2:
             state["sl"] = st.slider(
                 "SL", min_value=float(state["sl"] - nudge_range),
                 max_value=float(state["sl"] + nudge_range),
-                value=float(state["sl"]), format=price_fmt, key="rr_sl_slider")
+                value=float(state["sl"]), format=price_fmt, key=f"rr_sl_slider_{_k}")
         with sc3:
             state["tp"] = st.slider(
                 "TP", min_value=float(state["tp"] - nudge_range),
                 max_value=float(state["tp"] + nudge_range),
-                value=float(state["tp"]), format=price_fmt, key="rr_tp_slider")
+                value=float(state["tp"]), format=price_fmt, key=f"rr_tp_slider_{_k}")
 
     # ---- Metrics ----
     entry  = state["entry"]
