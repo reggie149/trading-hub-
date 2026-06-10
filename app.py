@@ -652,21 +652,36 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
 
     fig.update_layout(
-        xaxis=dict(rangeslider=dict(visible=False), domain=[0, 0.82], showticklabels=False),
+        xaxis=dict(
+            rangeslider=dict(visible=True, thickness=0.04),
+            domain=[0, 0.82],
+            showticklabels=True,
+        ),
         xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
                     zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
         xaxis3=dict(domain=[0, 0.82], matches="x", showgrid=False),
-        yaxis=dict(side="right", domain=[0.25, 1.0]),
+        yaxis=dict(side="right", domain=[0.25, 1.0], fixedrange=False),
         yaxis3=dict(domain=[0.0, 0.20], showgrid=False, showticklabels=False, zeroline=False, fixedrange=True),
         height=680, template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120, b=40, t=40), bargap=0,
+        margin=dict(r=120, b=60, t=40), bargap=0,
+        dragmode="pan",
+    )
+
+    chart_config = dict(
+        scrollZoom=True,
+        displayModeBar=True,
+        modeBarButtonsToRemove=["select2d", "lasso2d", "autoScale2d"],
+        modeBarButtonsToAdd=["pan2d", "zoom2d", "resetScale2d"],
+        displaylogo=False,
     )
 
     # Use on_select when R:R mode is active so clicks set price levels
     rr_mode = st.session_state.get("rr_state", {}).get("mode")
     if show_rr and rr_mode:
-        event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=f"rr_chart_{st.session_state.get('rr_chart_key',0)}")
+        event = st.plotly_chart(fig, use_container_width=True, on_select="rerun",
+                                config=chart_config,
+                                key=f"rr_chart_{st.session_state.get('rr_chart_key',0)}")
         if event and event.selection and event.selection.get("points"):
             clicked_y = event.selection["points"][0].get("y")
             if clicked_y is not None:
@@ -675,7 +690,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 st.session_state["rr_chart_key"]   = st.session_state.get("rr_chart_key", 0) + 1
                 st.rerun()
     else:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config=chart_config)
 
 
 # ============================================================
