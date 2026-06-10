@@ -16,8 +16,22 @@ st.markdown("Analyze historical market data, simulate trades, and execute on Rob
 # --- SIDEBAR CONTROL PANEL ---
 st.sidebar.header("🛠️ Strategy Parameters")
 ticker = st.sidebar.text_input("Asset Ticker", value="BTC-USD")
-timeline = st.sidebar.selectbox("History Period", ["1mo", "3mo", "6mo", "1y"], index=0)
-time_frame = st.sidebar.selectbox("Candle Interval", ["1h", "1d"], index=0)
+
+timeline = st.sidebar.selectbox(
+    "History Period",
+    ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+    index=2,
+)
+
+time_frame = st.sidebar.radio(
+    "Candle Interval",
+    ["1h", "4h", "1d"],
+    horizontal=True,
+)
+
+# yfinance does not support a native 4h interval — warn the user and map it
+YF_INTERVAL_MAP = {"1h": "1h", "4h": "1d", "1d": "1d"}
+
 st.sidebar.markdown("---")
 initial_capital = st.sidebar.number_input("Starting Capital ($)", value=10000.00, step=1000.00)
 fast_period = st.sidebar.slider("Fast EMA Period", min_value=2, max_value=50, value=12)
@@ -38,32 +52,49 @@ show_value_area = st.sidebar.toggle("Show Value Area (70%)", value=True)
 # --- Fair Value Gap Settings ---
 st.sidebar.markdown("---")
 st.sidebar.header("🔲 Fair Value Gaps")
-show_fvg      = st.sidebar.toggle("Show Fair Value Gaps", value=True)
-fvg_max       = st.sidebar.slider("Max Auto-FVGs to Display", min_value=1, max_value=50, value=10)
-show_bull_fvg = st.sidebar.toggle("Show Bullish FVGs", value=True)
-show_bear_fvg = st.sidebar.toggle("Show Bearish FVGs", value=True)
-show_filled   = st.sidebar.toggle("Show Filled FVGs", value=False)
+show_fvg        = st.sidebar.toggle("Show Fair Value Gaps", value=True)
+fvg_max         = st.sidebar.slider("Max Auto-FVGs to Display", min_value=1, max_value=50, value=10)
+show_bull_fvg   = st.sidebar.toggle("Show Bullish FVGs", value=True)
+show_bear_fvg   = st.sidebar.toggle("Show Bearish FVGs", value=True)
+show_filled     = st.sidebar.toggle("Show Filled FVGs", value=False)
 show_fvg_labels = st.sidebar.toggle("Show FVG Labels", value=True)
-fvg_min_pct   = st.sidebar.slider("Min Gap Size (% of price)", min_value=0.0, max_value=2.0, value=0.05, step=0.01,
-                                   help="Ignore gaps smaller than this % of current price — filters out noise")
-fvg_max_pct   = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, max_value=20.0, value=2.0, step=0.1,
-                                   help="Ignore gaps larger than this % of current price — removes chart-swallowing boxes")
+fvg_min_pct     = st.sidebar.slider("Min Gap Size (% of price)", min_value=0.0, max_value=2.0, value=0.05, step=0.01,
+                                     help="Ignore gaps smaller than this % of current price — filters out noise")
+fvg_max_pct     = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, max_value=20.0, value=2.0, step=0.1,
+                                     help="Ignore gaps larger than this % of current price — removes chart-swallowing boxes")
 
 # ============================================================
 # COINGECKO CRYPTO ID MAP
 # ============================================================
 CRYPTO_MAP = {
-    "BTC-USD": "bitcoin", "ETH-USD": "ethereum", "SOL-USD": "solana",
-    "DOGE-USD": "dogecoin", "ADA-USD": "cardano", "XRP-USD": "ripple",
-    "LTC-USD": "litecoin", "MATIC-USD": "matic-network",
+    "BTC-USD": "bitcoin",    "ETH-USD": "ethereum",   "SOL-USD": "solana",
+    "DOGE-USD": "dogecoin",  "ADA-USD": "cardano",     "XRP-USD": "ripple",
+    "LTC-USD": "litecoin",   "MATIC-USD": "matic-network",
     "AVAX-USD": "avalanche-2", "DOT-USD": "polkadot",
 }
-PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}
+
+PERIOD_DAYS = {
+    "1d": 1, "5d": 5, "1mo": 30, "3mo": 90,
+    "6mo": 180, "1y": 365, "2y": 730, "5y": 1825,
+}
 
 def is_crypto(symbol):
     return symbol.upper() in CRYPTO_MAP or symbol.upper().endswith("-USD")
 
-def load_crypto_coingecko(symbol, period):
+
+def resample_4h(df):
+    """Resample a 1h OHLCV DataFrame to 4h candles."""
+    if df.empty:
+        return df
+    df = df.copy()
+    df = df.set_index("Datetime")
+    ohlc_dict = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    df = df.resample("4h").agg(ohlc_dict).dropna(subset=["Close"])
+    df = df.reset_index()
+    return df
+
+
+def load_crypto_coingecko(symbol, period, interval="1h"):
     coin_id = CRYPTO_MAP.get(symbol.upper())
     if not coin_id:
         return pd.DataFrame()
@@ -78,9 +109,16 @@ def load_crypto_coingecko(symbol, period):
         df["Datetime"] = pd.to_datetime(df["Datetime"], unit="ms")
         df = df.sort_values("Datetime").reset_index(drop=True)
         df["Volume"] = (df["High"] - df["Low"]) * 1000
+        if interval == "4h":
+            df = resample_4h(df)
+        elif interval == "1d":
+            df = df.set_index("Datetime")
+            ohlc_dict = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+            df = df.resample("1D").agg(ohlc_dict).dropna(subset=["Close"]).reset_index()
         return df
     except:
         return pd.DataFrame()
+
 
 def get_live_price_crypto(symbol):
     coin_id = CRYPTO_MAP.get(symbol.upper())
@@ -93,14 +131,17 @@ def get_live_price_crypto(symbol):
     except:
         return None
 
+
 @st.cache_data(ttl=300)
 def load_data(symbol, per, inter):
     if is_crypto(symbol):
-        return load_crypto_coingecko(symbol, per)
-    df = yf.download(symbol, period=per, interval=inter, progress=False)
+        return load_crypto_coingecko(symbol, per, interval=inter)
+
+    yf_inter = YF_INTERVAL_MAP.get(inter, inter)
+    df = yf.download(symbol, period=per, interval=yf_inter, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.index.name = 'Datetime'
+    df.index.name = "Datetime"
     df.reset_index(inplace=True)
     return df
 
@@ -111,14 +152,15 @@ def get_live_price(symbol):
         data = yf.download(symbol, period="1d", interval="1m", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
-        return float(data['Close'].iloc[-1])
+        return float(data["Close"].iloc[-1])
     except:
         return None
 
+
 def compute_emas(df, fast, slow):
     df = df.copy()
-    df['Fast_EMA'] = df['Close'].ewm(span=fast, adjust=False).mean()
-    df['Slow_EMA'] = df['Close'].ewm(span=slow, adjust=False).mean()
+    df["Fast_EMA"] = df["Close"].ewm(span=fast, adjust=False).mean()
+    df["Slow_EMA"] = df["Close"].ewm(span=slow, adjust=False).mean()
     return df
 
 # ============================================================
@@ -143,14 +185,14 @@ def find_fair_value_gaps(df):
     if len(df) < 3:
         return fvg_list
 
-    datetimes = df['Datetime'].tolist()
+    datetimes = df["Datetime"].tolist()
     last_iso  = safe_isoformat(datetimes[-1])
 
     for i in range(1, len(df) - 1):
-        c1_high = float(df['High'].iloc[i - 1])
-        c1_low  = float(df['Low'].iloc[i - 1])
-        c3_high = float(df['High'].iloc[i + 1])
-        c3_low  = float(df['Low'].iloc[i + 1])
+        c1_high = float(df["High"].iloc[i - 1])
+        c1_low  = float(df["Low"].iloc[i - 1])
+        c3_high = float(df["High"].iloc[i + 1])
+        c3_low  = float(df["Low"].iloc[i + 1])
 
         if any(pd.isna(v) for v in [c1_high, c1_low, c3_high, c3_low]):
             continue
@@ -175,8 +217,8 @@ def find_fair_value_gaps(df):
         filled  = False
         end_iso = last_iso
         for j in range(i + 2, len(df)):
-            future_low  = float(df['Low'].iloc[j])
-            future_high = float(df['High'].iloc[j])
+            future_low  = float(df["Low"].iloc[j])
+            future_high = float(df["High"].iloc[j])
             if future_low <= gap_top and future_high >= gap_bottom:
                 end_iso = safe_isoformat(datetimes[j])
                 filled  = True
@@ -216,10 +258,10 @@ def compute_volume_profile(df, bins=40):
         n_bins = hi_idx - lo_idx
         if n_bins > 0:
             volume_at_level[lo_idx:hi_idx] += vol / n_bins
-    poc_idx    = int(np.argmax(volume_at_level))
-    total_vol  = volume_at_level.sum()
+    poc_idx   = int(np.argmax(volume_at_level))
+    total_vol = volume_at_level.sum()
     lo_ptr, hi_ptr = poc_idx, poc_idx
-    area_vol   = volume_at_level[poc_idx]
+    area_vol  = volume_at_level[poc_idx]
     while area_vol < total_vol * 0.70:
         expand_lo = volume_at_level[lo_ptr - 1] if lo_ptr > 0        else 0
         expand_hi = volume_at_level[hi_ptr + 1] if hi_ptr < bins - 1 else 0
@@ -244,45 +286,45 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
-        x=df['Datetime'], open=df['Open'], high=df['High'],
-        low=df['Low'], close=df['Close'],
+        x=df["Datetime"], open=df["Open"], high=df["High"],
+        low=df["Low"], close=df["Close"],
         name="Price Action", xaxis="x", yaxis="y"
     ))
     fig.add_trace(go.Scatter(
-        x=df['Datetime'], y=df['Fast_EMA'],
-        line=dict(color='orange', width=1.5),
-        name=f'{fast_period} Fast EMA', xaxis="x", yaxis="y"
+        x=df["Datetime"], y=df["Fast_EMA"],
+        line=dict(color="orange", width=1.5),
+        name=f"{fast_period} Fast EMA", xaxis="x", yaxis="y"
     ))
     fig.add_trace(go.Scatter(
-        x=df['Datetime'], y=df['Slow_EMA'],
-        line=dict(color='#4da6ff', width=1.5),
-        name=f'{slow_period} Slow EMA', xaxis="x", yaxis="y"
+        x=df["Datetime"], y=df["Slow_EMA"],
+        line=dict(color="#4da6ff", width=1.5),
+        name=f"{slow_period} Slow EMA", xaxis="x", yaxis="y"
     ))
 
-    if 'Volume' in df.columns:
+    if "Volume" in df.columns:
         vol_colors = [
-            'rgba(0,200,100,0.6)' if float(df['Close'].iloc[i]) >= float(df['Open'].iloc[i])
-            else 'rgba(255,60,60,0.6)'
+            "rgba(0,200,100,0.6)" if float(df["Close"].iloc[i]) >= float(df["Open"].iloc[i])
+            else "rgba(255,60,60,0.6)"
             for i in range(len(df))
         ]
         fig.add_trace(go.Bar(
-            x=df['Datetime'], y=df['Volume'],
-            marker_color=vol_colors, name='Volume',
-            xaxis='x3', yaxis='y3', showlegend=True,
-            hovertemplate='%{x}<br>Volume: %{y:,.0f}<extra></extra>',
+            x=df["Datetime"], y=df["Volume"],
+            marker_color=vol_colors, name="Volume",
+            xaxis="x3", yaxis="y3", showlegend=True,
+            hovertemplate="%{x}<br>Volume: %{y:,.0f}<extra></extra>",
         ))
 
     if buy_x:
         fig.add_trace(go.Scatter(
-            x=buy_x, y=buy_y, mode='markers',
-            marker=dict(symbol='triangle-up', size=12, color='green', line=dict(width=2, color='black')),
-            name='BUY Entry', xaxis="x", yaxis="y"
+            x=buy_x, y=buy_y, mode="markers",
+            marker=dict(symbol="triangle-up", size=12, color="green", line=dict(width=2, color="black")),
+            name="BUY Entry", xaxis="x", yaxis="y"
         ))
     if sell_x:
         fig.add_trace(go.Scatter(
-            x=sell_x, y=sell_y, mode='markers',
-            marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=2, color='black')),
-            name='SELL Exit', xaxis="x", yaxis="y"
+            x=sell_x, y=sell_y, mode="markers",
+            marker=dict(symbol="triangle-down", size=12, color="red", line=dict(width=2, color="black")),
+            name="SELL Exit", xaxis="x", yaxis="y"
         ))
 
     if show_fvg:
@@ -328,17 +370,17 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
                 )
 
             if is_filled and not filled_legend:
-                fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
-                    marker=dict(size=10, color='rgba(180,180,180,0.4)', symbol='square'),
-                    name='Filled FVG', xaxis="x", yaxis="y")); filled_legend = True
+                fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                    marker=dict(size=10, color="rgba(180,180,180,0.4)", symbol="square"),
+                    name="Filled FVG", xaxis="x", yaxis="y")); filled_legend = True
             elif is_bull and not bull_legend and not is_filled:
-                fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
-                    marker=dict(size=10, color='rgba(0,200,100,0.6)', symbol='square'),
-                    name='Bullish FVG', xaxis="x", yaxis="y")); bull_legend = True
+                fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                    marker=dict(size=10, color="rgba(0,200,100,0.6)", symbol="square"),
+                    name="Bullish FVG", xaxis="x", yaxis="y")); bull_legend = True
             elif not is_bull and not bear_legend and not is_filled:
-                fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
-                    marker=dict(size=10, color='rgba(255,60,60,0.6)', symbol='square'),
-                    name='Bearish FVG', xaxis="x", yaxis="y")); bear_legend = True
+                fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                    marker=dict(size=10, color="rgba(255,60,60,0.6)", symbol="square"),
+                    name="Bearish FVG", xaxis="x", yaxis="y")); bear_legend = True
 
     if show_vp:
         vp = compute_volume_profile(df, bins=vp_bins)
@@ -359,7 +401,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
 
             fig.add_trace(go.Bar(
                 x=volumes / max_vol, y=prices,
-                orientation='h', width=(prices[-1] - prices[0]) / vp_bins * 0.85,
+                orientation="h", width=(prices[-1] - prices[0]) / vp_bins * 0.85,
                 marker_color=bar_colours, name="Volume Profile",
                 xaxis="x2", yaxis="y",
                 hovertemplate="Price: %{y:,.2f}<br>Volume: %{customdata:,.0f}<extra></extra>",
@@ -386,7 +428,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period, ext
         xaxis=dict(rangeslider=dict(visible=False), domain=[0, 0.82], showticklabels=False),
         xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
                     zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
-        xaxis3=dict(domain=[0, 0.82], matches='x', showgrid=False),
+        xaxis3=dict(domain=[0, 0.82], matches="x", showgrid=False),
         yaxis=dict(side="right", domain=[0.25, 1.0]),
         yaxis3=dict(domain=[0.0, 0.20], showgrid=False, showticklabels=False, zeroline=False, fixedrange=True),
         height=680, template="plotly_dark",
@@ -404,8 +446,8 @@ def manual_fvg_ui(df):
 
     st.markdown("#### ✏️ Manual Fair Value Gaps")
 
-    price_min = float(df['Low'].min())
-    price_max = float(df['High'].max())
+    price_min = float(df["Low"].min())
+    price_max = float(df["High"].max())
     mid_price = (price_min + price_max) / 2.0
     gap_size  = (price_max - price_min) * 0.01
 
@@ -436,8 +478,8 @@ def manual_fvg_ui(df):
                     "type":       m_type,
                     "top":        m_top,
                     "bottom":     m_bottom,
-                    "start_time": safe_isoformat(df['Datetime'].iloc[start_idx]),
-                    "end_time":   safe_isoformat(df['Datetime'].iloc[end_idx]),
+                    "start_time": safe_isoformat(df["Datetime"].iloc[start_idx]),
+                    "end_time":   safe_isoformat(df["Datetime"].iloc[end_idx]),
                     "filled":     False,
                     "source":     "manual",
                 })
@@ -456,7 +498,7 @@ def manual_fvg_ui(df):
                 ec1, ec2 = st.columns(2)
                 with ec1:
                     new_type   = st.selectbox("Type", ["bullish", "bearish"],
-                                              index=0 if fvg["type"]=="bullish" else 1,
+                                              index=0 if fvg["type"] == "bullish" else 1,
                                               key=f"edit_type_{i}")
                     new_top    = st.number_input("Top",    value=float(fvg["top"]),
                                                  format="%.4f", key=f"edit_top_{i}")
@@ -466,7 +508,7 @@ def manual_fvg_ui(df):
                     total_candles = len(df)
                     def closest_idx(iso_str):
                         target = pd.Timestamp(iso_str)
-                        diffs  = (df['Datetime'] - target).abs()
+                        diffs  = (df["Datetime"] - target).abs()
                         return int(diffs.argmin())
                     cur_start = closest_idx(fvg["start_time"])
                     cur_end   = closest_idx(fvg["end_time"])
@@ -490,8 +532,8 @@ def manual_fvg_ui(df):
                                 "type":       new_type,
                                 "top":        new_top,
                                 "bottom":     new_bottom,
-                                "start_time": safe_isoformat(df['Datetime'].iloc[new_start_idx]),
-                                "end_time":   safe_isoformat(df['Datetime'].iloc[new_end_idx]),
+                                "start_time": safe_isoformat(df["Datetime"].iloc[new_start_idx]),
+                                "end_time":   safe_isoformat(df["Datetime"].iloc[new_end_idx]),
                                 "filled":     new_filled,
                                 "source":     "manual",
                             }
@@ -525,9 +567,9 @@ if app_mode == "📊 Backtest":
         for idx, row in df.iterrows():
             if idx < slow_period:
                 continue
-            current_price = float(row['Close'])
-            fast_ma, slow_ma = float(row['Fast_EMA']), float(row['Slow_EMA'])
-            timestamp = row['Datetime']
+            current_price = float(row["Close"])
+            fast_ma, slow_ma = float(row["Fast_EMA"]), float(row["Slow_EMA"])
+            timestamp = row["Datetime"]
 
             if not is_invested and fast_ma > slow_ma:
                 position = cash / current_price; cash = 0.0; is_invested = True
@@ -538,15 +580,15 @@ if app_mode == "📊 Backtest":
                 trade_log.append({"Action": "SELL", "Time": timestamp, "Price": round(current_price, 2), "Net Worth": round(cash, 2)})
                 sell_signals_x.append(timestamp); sell_signals_y.append(current_price)
 
-        final_price  = float(df.iloc[-1]['Close'])
+        final_price  = float(df.iloc[-1]["Close"])
         final_value  = cash if not is_invested else position * final_price
         total_return = ((final_value - initial_capital) / initial_capital) * 100
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Starting Capital",      f"${initial_capital:,.2f}")
-        col2.metric("Ending Net Worth",      f"${final_value:,.2f}")
-        col3.metric("Total Return",          f"{total_return:+.2f}%", delta_color="normal")
-        col4.metric("Total Trades Executed",  len(trade_log))
+        col1.metric("Starting Capital",     f"${initial_capital:,.2f}")
+        col2.metric("Ending Net Worth",     f"${final_value:,.2f}")
+        col3.metric("Total Return",         f"{total_return:+.2f}%", delta_color="normal")
+        col4.metric("Total Trades Executed", len(trade_log))
         st.markdown("---")
         st.subheader("📊 Interactive Market Chart & Execution Flags")
 
@@ -569,7 +611,7 @@ elif app_mode == "🧪 Simulation":
     sim_mode   = st.radio("Simulation Type", ["📡 Paper Trade (Live Prices)", "🔁 Historical Replay"], horizontal=True)
     auto_trade = st.toggle("🤖 Auto-trade on EMA signals", value=False)
 
-    if 'sim_cash' not in st.session_state:
+    if "sim_cash" not in st.session_state:
         st.session_state.sim_cash     = initial_capital
         st.session_state.sim_position = 0.0
         st.session_state.sim_invested = False
@@ -596,9 +638,9 @@ elif app_mode == "🧪 Simulation":
         live_price = get_live_price(ticker)
         if live_price:
             st.metric("Current Live Price", f"${live_price:,.2f}")
-            df_chart = compute_emas(load_data(ticker, "1mo", "1h"), fast_period, slow_period)
+            df_chart = compute_emas(load_data(ticker, "1mo", time_frame), fast_period, slow_period)
             if auto_trade and len(df_chart) > slow_period:
-                fast_now, slow_now = float(df_chart['Fast_EMA'].iloc[-1]), float(df_chart['Slow_EMA'].iloc[-1])
+                fast_now, slow_now = float(df_chart["Fast_EMA"].iloc[-1]), float(df_chart["Slow_EMA"].iloc[-1])
                 now = datetime.now()
                 if not st.session_state.sim_invested and fast_now > slow_now:
                     sim_buy(live_price, now); st.success(f"🤖 Auto-BUY triggered at ${live_price:,.2f}")
@@ -614,7 +656,7 @@ elif app_mode == "🧪 Simulation":
                         sim_sell(live_price, datetime.now()); st.success(f"Sold at ${live_price:,.2f}")
                 with col_r:
                     if st.button("🔄 Reset", use_container_width=True):
-                        for k in ['sim_cash','sim_position','sim_invested','sim_trades','sim_buy_x','sim_buy_y','sim_sell_x','sim_sell_y']:
+                        for k in ["sim_cash","sim_position","sim_invested","sim_trades","sim_buy_x","sim_buy_y","sim_sell_x","sim_sell_y"]:
                             del st.session_state[k]
                         st.rerun()
             if not df_chart.empty:
@@ -628,7 +670,7 @@ elif app_mode == "🧪 Simulation":
     else:
         st.subheader("🔁 Historical Data Replay")
         df_replay = compute_emas(load_data(ticker, timeline, time_frame), fast_period, slow_period)
-        if 'replay_idx' not in st.session_state:
+        if "replay_idx" not in st.session_state:
             st.session_state.replay_idx = slow_period
 
         col_a, col_b = st.columns(2)
@@ -642,12 +684,12 @@ elif app_mode == "🧪 Simulation":
 
         idx           = st.session_state.replay_idx
         df_visible    = df_replay.iloc[:idx+1].copy()
-        current_price = float(df_visible['Close'].iloc[-1])
-        timestamp     = df_visible['Datetime'].iloc[-1]
+        current_price = float(df_visible["Close"].iloc[-1])
+        timestamp     = df_visible["Datetime"].iloc[-1]
         st.metric("Current Replay Price", f"${current_price:,.2f}", f"Candle {idx} of {len(df_replay)}")
 
         if auto_trade and len(df_visible) > slow_period:
-            fast_now, slow_now = float(df_visible['Fast_EMA'].iloc[-1]), float(df_visible['Slow_EMA'].iloc[-1])
+            fast_now, slow_now = float(df_visible["Fast_EMA"].iloc[-1]), float(df_visible["Slow_EMA"].iloc[-1])
             if not st.session_state.sim_invested and fast_now > slow_now:
                 sim_buy(current_price, timestamp)
             elif st.session_state.sim_invested and fast_now < slow_now:
@@ -662,7 +704,7 @@ elif app_mode == "🧪 Simulation":
                     sim_sell(current_price, timestamp)
             with col_r2:
                 if st.button("🔄 Reset", use_container_width=True):
-                    for k in ['sim_cash','sim_position','sim_invested','sim_trades','sim_buy_x','sim_buy_y','sim_sell_x','sim_sell_y','replay_idx']:
+                    for k in ["sim_cash","sim_position","sim_invested","sim_trades","sim_buy_x","sim_buy_y","sim_sell_x","sim_sell_y","replay_idx"]:
                         del st.session_state[k]
                     st.rerun()
 
@@ -700,7 +742,7 @@ elif app_mode == "🤖 Robinhood Live":
         st.code("python -m pip install robin_stocks", language="bash")
     else:
         st.warning("⚠️ This mode executes REAL trades with REAL money. Use with caution.")
-        with st.expander("🔐 Robinhood Login", expanded='rh_logged_in' not in st.session_state):
+        with st.expander("🔐 Robinhood Login", expanded="rh_logged_in" not in st.session_state):
             rh_user = st.text_input("Robinhood Email")
             rh_pass = st.text_input("Robinhood Password", type="password")
             if st.button("Login to Robinhood"):
@@ -711,12 +753,12 @@ elif app_mode == "🤖 Robinhood Live":
                 except Exception as e:
                     st.error(f"Login failed: {e}")
 
-        if st.session_state.get('rh_logged_in'):
+        if st.session_state.get("rh_logged_in"):
             st.subheader("💼 Portfolio Overview")
             try:
                 profile      = r.load_portfolio_profile()
-                equity       = float(profile.get('equity', 0))
-                buying_power = float(r.load_account_profile().get('buying_power', 0))
+                equity       = float(profile.get("equity", 0))
+                buying_power = float(r.load_account_profile().get("buying_power", 0))
                 col1, col2 = st.columns(2)
                 col1.metric("Total Equity", f"${equity:,.2f}")
                 col2.metric("Buying Power", f"${buying_power:,.2f}")
@@ -729,8 +771,8 @@ elif app_mode == "🤖 Robinhood Live":
                 if positions:
                     pos_data = []
                     for p in positions:
-                        instrument = r.get_instrument_by_url(p['instrument'])
-                        pos_data.append({"Symbol": instrument.get('symbol','N/A'), "Quantity": float(p.get('quantity',0)), "Avg Buy Price": float(p.get('average_buy_price',0))})
+                        instrument = r.get_instrument_by_url(p["instrument"])
+                        pos_data.append({"Symbol": instrument.get("symbol","N/A"), "Quantity": float(p.get("quantity",0)), "Avg Buy Price": float(p.get("average_buy_price",0))})
                     st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
                 else:
                     st.info("No open positions.")
@@ -742,9 +784,9 @@ elif app_mode == "🤖 Robinhood Live":
             if live_price:
                 st.metric(f"Live Price: {ticker}", f"${live_price:,.2f}")
 
-            df_live  = compute_emas(load_data(ticker, "1mo", "1h"), fast_period, slow_period)
-            fast_now = float(df_live['Fast_EMA'].iloc[-1])
-            slow_now = float(df_live['Slow_EMA'].iloc[-1])
+            df_live  = compute_emas(load_data(ticker, "1mo", time_frame), fast_period, slow_period)
+            fast_now = float(df_live["Fast_EMA"].iloc[-1])
+            slow_now = float(df_live["Slow_EMA"].iloc[-1])
             signal   = "🟢 BUY Signal" if fast_now > slow_now else "🔴 SELL Signal"
             st.subheader(f"EMA Signal: {signal}")
 
@@ -764,8 +806,8 @@ elif app_mode == "🤖 Robinhood Live":
                     if st.button("⚡ Execute AUTO-SELL"):
                         try:
                             for h in r.get_crypto_positions():
-                                if h['currency']['code'] == crypto_symbol:
-                                    order = r.order_sell_crypto_by_quantity(crypto_symbol, float(h['quantity_available']))
+                                if h["currency"]["code"] == crypto_symbol:
+                                    order = r.order_sell_crypto_by_quantity(crypto_symbol, float(h["quantity_available"]))
                                     st.success(f"✅ SELL placed! ID: {order.get('id')}")
                         except Exception as e:
                             st.error(f"Order failed: {e}")
@@ -784,8 +826,8 @@ elif app_mode == "🤖 Robinhood Live":
                     if st.button("🔴 Place SELL Order", use_container_width=True):
                         try:
                             for h in r.get_crypto_positions():
-                                if h['currency']['code'] == crypto_symbol:
-                                    qty   = float(h['quantity_available']) * (sell_pct / 100)
+                                if h["currency"]["code"] == crypto_symbol:
+                                    qty   = float(h["quantity_available"]) * (sell_pct / 100)
                                     order = r.order_sell_crypto_by_quantity(crypto_symbol, qty)
                                     st.success(f"✅ SELL placed! ID: {order.get('id')}")
                         except Exception as e:
@@ -798,8 +840,7 @@ elif app_mode == "🤖 Robinhood Live":
                 render_chart(df_live, [], [], [], [], fast_period, slow_period, extra_fvgs=manual_fvgs)
 
 # ============================================================
-# RULES MANAGER  — with editable rules, stable sections,
-#                  and Enter-to-add
+# RULES MANAGER
 # ============================================================
 elif app_mode == "📋 Rules Manager":
 
@@ -824,13 +865,11 @@ elif app_mode == "📋 Rules Manager":
     st.header("📋 Trading Rules Manager")
     st.markdown("Organize your rules into custom sections. Toggle, edit, or delete rules anytime.")
 
-    # Initialise session state from file once
     if "rm_sections" not in st.session_state:
         st.session_state.rm_sections = load_all(RULES_FILE)
 
     sections = st.session_state.rm_sections
 
-    # ── Add new section ───────────────────────────────────────
     st.subheader("➕ Add New Section")
     col_sec, col_sec_btn = st.columns([4, 1])
     with col_sec:
@@ -849,7 +888,6 @@ elif app_mode == "📋 Rules Manager":
     if not sections:
         st.info("No sections yet. Add your first section above.")
     else:
-        # Track which sections should stay expanded
         if "rm_open" not in st.session_state:
             st.session_state.rm_open = {}
 
@@ -857,15 +895,11 @@ elif app_mode == "📋 Rules Manager":
             total        = len(section["rules"])
             active_count = sum(1 for r in section["rules"] if r["active"])
             sec_key      = f"sec_open_{s_idx}"
-
-            # Keep section expanded after any button click
-            is_open = st.session_state.rm_open.get(sec_key, False)
+            is_open      = st.session_state.rm_open.get(sec_key, False)
 
             with st.expander(f"📁 {section['name']}  —  {active_count}/{total} active", expanded=is_open):
-                # Mark this section as open whenever user interacts inside it
                 st.session_state.rm_open[sec_key] = True
 
-                # ── Rename / Delete section ──
                 col_rename, col_rename_btn, col_del = st.columns([4, 1, 1])
                 with col_rename:
                     new_name = st.text_input("Rename section", value=section["name"], key=f"rename_{s_idx}")
@@ -886,15 +920,12 @@ elif app_mode == "📋 Rules Manager":
 
                 st.markdown("---")
 
-                # ── Add rule — pressing Enter triggers the add ──
                 new_rule = st.text_input(
                     "New rule (press Enter to add)",
                     placeholder="e.g. Only enter when volume is above 20-period average",
                     key=f"new_rule_{s_idx}"
                 )
-                # Enter submits because st.text_input reruns on Enter by default
                 if new_rule.strip() and st.session_state.get(f"new_rule_{s_idx}") == new_rule:
-                    # Only add if this is a fresh value not already saved
                     last_key = f"last_added_{s_idx}"
                     if st.session_state.get(last_key) != new_rule:
                         sections[s_idx]["rules"].append({"rule": new_rule.strip(), "active": True})
@@ -904,7 +935,6 @@ elif app_mode == "📋 Rules Manager":
 
                 st.markdown("---")
 
-                # ── List rules ──
                 if not section["rules"]:
                     st.caption("No rules in this section yet.")
                 else:
@@ -920,7 +950,6 @@ elif app_mode == "📋 Rules Manager":
                         with col_rule:
                             edit_key = f"editing_{s_idx}_{r_idx}"
                             if st.session_state.get(edit_key, False):
-                                # Show editable text input
                                 edited = st.text_input("Edit rule", value=rule["rule"],
                                                        key=f"edit_input_{s_idx}_{r_idx}",
                                                        label_visibility="collapsed")
@@ -947,7 +976,6 @@ elif app_mode == "📋 Rules Manager":
                                 save_all(sections, RULES_FILE)
                                 st.rerun()
 
-        # ── Global active rules summary ───────────────────────
         st.markdown("---")
         st.subheader("✅ All Active Rules")
         any_active = False
