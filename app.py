@@ -64,7 +64,7 @@ fvg_max_pct     = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, 
 st.sidebar.markdown("---")
 st.sidebar.header("🕐 Market Hours Filter")
 show_closed_gaps = st.sidebar.toggle("Show Closed Market Annotations", value=True)
-
+remove_time_gaps   = st.sidebar.toggle("Remove Time Gaps (Categorical Axis)", value=False)
 # ============================================================
 # INTERVAL / PERIOD MAPS & VALIDATION
 # ============================================================
@@ -408,20 +408,64 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 40):
 # ============================================================
 def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                  extra_fvgs=None, closed_gaps=None):
+
+    # ------------------------------------------------------------------
+    # CATEGORICAL MODE: map everything to integer indices so Plotly
+    # plots candles back-to-back with zero overnight/weekend gaps.
+    # All x-references (signals, FVGs, annotations) are converted to
+    # the nearest integer index. Tick labels show the real datetime.
+    # ------------------------------------------------------------------
+    use_cat = remove_time_gaps and not is_crypto(ticker) and time_frame != "1d"
+
+    if use_cat:
+        idx_arr   = list(range(len(df)))
+        dt_str    = df["Datetime"].dt.strftime("%b %d %H:%M").tolist()
+        x_candle  = idx_arr
+        x_ema_f   = idx_arr
+        x_ema_s   = idx_arr
+        x_vol     = idx_arr
+
+        # Map a Timestamp → nearest integer index
+        dt_index = pd.DatetimeIndex(df["Datetime"])
+        def ts_to_idx(ts):
+            try:
+                pos = dt_index.get_indexer([pd.Timestamp(ts)], method="nearest")[0]
+                return int(pos)
+            except Exception:
+                return 0
+
+        buy_x_plot  = [ts_to_idx(t) for t in buy_x]
+        sell_x_plot = [ts_to_idx(t) for t in sell_x]
+
+        tick_step  = max(1, len(df) // 10)
+        tickvals   = idx_arr[::tick_step]
+        ticktext   = [dt_str[i] for i in tickvals]
+
+    else:
+        x_candle  = df["Datetime"]
+        x_ema_f   = df["Datetime"]
+        x_ema_s   = df["Datetime"]
+        x_vol     = df["Datetime"]
+        buy_x_plot  = buy_x
+        sell_x_plot = sell_x
+        tickvals = ticktext = None
+
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
-        x=df["Datetime"], open=df["Open"], high=df["High"],
+        x=x_candle, open=df["Open"], high=df["High"],
         low=df["Low"], close=df["Close"],
-        name="Price Action", xaxis="x", yaxis="y"
+        name="Price Action", xaxis="x", yaxis="y",
+        text=df["Datetime"].astype(str) if use_cat else None,
+        hovertext=df["Datetime"].dt.strftime("%Y-%m-%d %H:%M") if use_cat else None,
     ))
     fig.add_trace(go.Scatter(
-        x=df["Datetime"], y=df["Fast_EMA"],
+        x=x_ema_f, y=df["Fast_EMA"],
         line=dict(color="orange", width=1.5),
         name=f"{fast_period} Fast EMA", xaxis="x", yaxis="y"
     ))
     fig.add_trace(go.Scatter(
-        x=df["Datetime"], y=df["Slow_EMA"],
+        x=x_ema_s, y=df["Slow_EMA"],
         line=dict(color="#4da6ff", width=1.5),
         name=f"{slow_period} Slow EMA", xaxis="x", yaxis="y"
     ))
@@ -433,21 +477,21 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
             for i in range(len(df))
         ]
         fig.add_trace(go.Bar(
-            x=df["Datetime"], y=df["Volume"],
+            x=x_vol, y=df["Volume"],
             marker_color=vol_colors, name="Volume",
             xaxis="x3", yaxis="y3", showlegend=True,
             hovertemplate="%{x}<br>Volume: %{y:,.0f}<extra></extra>",
         ))
 
-    if buy_x:
+    if buy_x_plot:
         fig.add_trace(go.Scatter(
-            x=buy_x, y=buy_y, mode="markers",
+            x=buy_x_plot, y=buy_y, mode="markers",
             marker=dict(symbol="triangle-up", size=12, color="green", line=dict(width=2, color="black")),
             name="BUY Entry", xaxis="x", yaxis="y"
         ))
-    if sell_x:
+    if sell_x_plot:
         fig.add_trace(go.Scatter(
-            x=sell_x, y=sell_y, mode="markers",
+            x=sell_x_plot, y=sell_y, mode="markers",
             marker=dict(symbol="triangle-down", size=12, color="red", line=dict(width=2, color="black")),
             name="SELL Exit", xaxis="x", yaxis="y"
         ))
@@ -455,27 +499,44 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
     # ---- MARKET CLOSED ANNOTATIONS ----
     if show_closed_gaps and closed_gaps:
         for gap in closed_gaps:
-            # Subtle shaded column behind the price pane
-            fig.add_vrect(
-                x0=gap["x0"], x1=gap["x1"],
-                fillcolor="rgba(120,120,160,0.07)",
-                line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
-                layer="below",
-            )
-            # Small label pinned just above the chart area
-            fig.add_annotation(
-                x=gap["x0"],
-                xref="x",
-                y=1.01,
-                yref="paper",
-                text=gap["label"],
-                showarrow=False,
-                font=dict(size=9, color="rgba(180,180,210,0.85)"),
-                xanchor="left",
-                bgcolor="rgba(30,30,50,0.50)",
-                borderpad=3,
-            )
+            if use_cat:
+                # In categorical mode: find the last filtered index before
+                # the gap starts and annotate with a vertical line + label
+                x_pos = ts_to_idx(gap["x0"])
+                fig.add_vline(
+                    x=x_pos,
+                    line=dict(color="rgba(120,120,160,0.35)", width=1, dash="dot"),
+                    layer="below",
+                )
+                fig.add_annotation(
+                    x=x_pos, xref="x",
+                    y=1.01, yref="paper",
+                    text=gap["label"],
+                    showarrow=False,
+                    font=dict(size=9, color="rgba(180,180,210,0.85)"),
+                    xanchor="left",
+                    bgcolor="rgba(30,30,50,0.55)",
+                    borderpad=3,
+                )
+            else:
+                fig.add_vrect(
+                    x0=gap["x0"], x1=gap["x1"],
+                    fillcolor="rgba(120,120,160,0.07)",
+                    line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
+                    layer="below",
+                )
+                fig.add_annotation(
+                    x=gap["x0"], xref="x",
+                    y=1.01, yref="paper",
+                    text=gap["label"],
+                    showarrow=False,
+                    font=dict(size=9, color="rgba(180,180,210,0.85)"),
+                    xanchor="left",
+                    bgcolor="rgba(30,30,50,0.55)",
+                    borderpad=3,
+                )
 
+    # ---- FAIR VALUE GAPS ----
     if show_fvg:
         auto_fvgs   = find_fair_value_gaps(df)[-fvg_max:]
         all_fvgs    = auto_fvgs + (extra_fvgs or [])
@@ -501,10 +562,17 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 border_col = "rgba(255,60,60,0.60)"  if not is_manual else "rgba(255,100,100,0.85)"
                 dash_style = "solid"
 
+            if use_cat:
+                x0_plot = ts_to_idx(fvg["start_time"])
+                x1_plot = ts_to_idx(fvg["end_time"])
+            else:
+                x0_plot = fvg["start_time"]
+                x1_plot = fvg["end_time"]
+
             fig.add_shape(
                 type="rect",
-                x0=fvg["start_time"], x1=fvg["end_time"], xref="x",
-                y0=fvg["bottom"],     y1=fvg["top"],       yref="y",
+                x0=x0_plot, x1=x1_plot, xref="x",
+                y0=fvg["bottom"], y1=fvg["top"], yref="y",
                 fillcolor=fill_col,
                 line=dict(color=border_col, width=1 if not is_manual else 1.5, dash=dash_style),
             )
@@ -512,7 +580,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 mid   = (fvg["top"] + fvg["bottom"]) / 2
                 label = ("✏️ " if is_manual else "") + ("Bull FVG" if is_bull else "Bear FVG") + (" ✓" if is_filled else "")
                 fig.add_annotation(
-                    x=fvg["start_time"], xref="x", y=mid, yref="y",
+                    x=x0_plot, xref="x", y=mid, yref="y",
                     text=label, showarrow=False,
                     font=dict(color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)", size=9),
                     xanchor="left", bgcolor="rgba(0,0,0,0.35)",
@@ -531,6 +599,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                     marker=dict(size=10, color="rgba(255,60,60,0.6)", symbol="square"),
                     name="Bearish FVG", xaxis="x", yaxis="y")); bear_legend = True
 
+    # ---- VOLUME PROFILE ----
     if show_vp:
         vp = compute_volume_profile(df, bins=vp_bins)
         if vp is not None:
@@ -573,8 +642,23 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                     text=f" VAL {val:,.2f}", showarrow=False,
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
 
+    # ---- LAYOUT ----
+    xaxis_cfg = dict(
+        rangeslider=dict(visible=False),
+        domain=[0, 0.82],
+        showticklabels=True,
+    )
+    if use_cat and tickvals is not None:
+        xaxis_cfg.update(
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            tickangle=-45,
+            tickfont=dict(size=10),
+        )
+
     fig.update_layout(
-        xaxis=dict(rangeslider=dict(visible=False), domain=[0, 0.82], showticklabels=False),
+        xaxis=xaxis_cfg,
         xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
                     zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
         xaxis3=dict(domain=[0, 0.82], matches="x", showgrid=False),
@@ -582,10 +666,9 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
         yaxis3=dict(domain=[0.0, 0.20], showgrid=False, showticklabels=False, zeroline=False, fixedrange=True),
         height=680, template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120, b=40, t=40), bargap=0,
+        margin=dict(r=120, b=60, t=40), bargap=0,
     )
     st.plotly_chart(fig, use_container_width=True)
-
 
 # ============================================================
 # MANUAL FVG MANAGER
