@@ -64,7 +64,15 @@ fvg_max_pct     = st.sidebar.slider("Max Gap Size (% of price)", min_value=0.5, 
 st.sidebar.markdown("---")
 st.sidebar.header("🕐 Market Hours Filter")
 show_closed_gaps = st.sidebar.toggle("Show Closed Market Annotations", value=True)
-remove_time_gaps   = st.sidebar.toggle("Remove Time Gaps (Categorical Axis)", value=False)
+
+# --- Risk / Reward Settings ---
+st.sidebar.markdown("---")
+st.sidebar.header("⚖️ Risk / Reward Tool")
+show_rr          = st.sidebar.toggle("Show R:R Tool", value=False)
+show_rr_on_chart = st.sidebar.toggle("Show R:R Label on Chart", value=True)
+rr_account_size  = st.sidebar.number_input("Account Size ($)", value=10000.0, step=500.0)
+rr_risk_pct      = st.sidebar.slider("Max Risk per Trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
+
 # ============================================================
 # INTERVAL / PERIOD MAPS & VALIDATION
 # ============================================================
@@ -408,64 +416,20 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 40):
 # ============================================================
 def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                  extra_fvgs=None, closed_gaps=None):
-
-    # ------------------------------------------------------------------
-    # CATEGORICAL MODE: map everything to integer indices so Plotly
-    # plots candles back-to-back with zero overnight/weekend gaps.
-    # All x-references (signals, FVGs, annotations) are converted to
-    # the nearest integer index. Tick labels show the real datetime.
-    # ------------------------------------------------------------------
-    use_cat = remove_time_gaps and not is_crypto(ticker) and time_frame != "1d"
-
-    if use_cat:
-        idx_arr   = list(range(len(df)))
-        dt_str    = df["Datetime"].dt.strftime("%b %d %H:%M").tolist()
-        x_candle  = idx_arr
-        x_ema_f   = idx_arr
-        x_ema_s   = idx_arr
-        x_vol     = idx_arr
-
-        # Map a Timestamp → nearest integer index
-        dt_index = pd.DatetimeIndex(df["Datetime"])
-        def ts_to_idx(ts):
-            try:
-                pos = dt_index.get_indexer([pd.Timestamp(ts)], method="nearest")[0]
-                return int(pos)
-            except Exception:
-                return 0
-
-        buy_x_plot  = [ts_to_idx(t) for t in buy_x]
-        sell_x_plot = [ts_to_idx(t) for t in sell_x]
-
-        tick_step  = max(1, len(df) // 10)
-        tickvals   = idx_arr[::tick_step]
-        ticktext   = [dt_str[i] for i in tickvals]
-
-    else:
-        x_candle  = df["Datetime"]
-        x_ema_f   = df["Datetime"]
-        x_ema_s   = df["Datetime"]
-        x_vol     = df["Datetime"]
-        buy_x_plot  = buy_x
-        sell_x_plot = sell_x
-        tickvals = ticktext = None
-
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
-        x=x_candle, open=df["Open"], high=df["High"],
+        x=df["Datetime"], open=df["Open"], high=df["High"],
         low=df["Low"], close=df["Close"],
-        name="Price Action", xaxis="x", yaxis="y",
-        text=df["Datetime"].astype(str) if use_cat else None,
-        hovertext=df["Datetime"].dt.strftime("%Y-%m-%d %H:%M") if use_cat else None,
+        name="Price Action", xaxis="x", yaxis="y"
     ))
     fig.add_trace(go.Scatter(
-        x=x_ema_f, y=df["Fast_EMA"],
+        x=df["Datetime"], y=df["Fast_EMA"],
         line=dict(color="orange", width=1.5),
         name=f"{fast_period} Fast EMA", xaxis="x", yaxis="y"
     ))
     fig.add_trace(go.Scatter(
-        x=x_ema_s, y=df["Slow_EMA"],
+        x=df["Datetime"], y=df["Slow_EMA"],
         line=dict(color="#4da6ff", width=1.5),
         name=f"{slow_period} Slow EMA", xaxis="x", yaxis="y"
     ))
@@ -477,21 +441,21 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
             for i in range(len(df))
         ]
         fig.add_trace(go.Bar(
-            x=x_vol, y=df["Volume"],
+            x=df["Datetime"], y=df["Volume"],
             marker_color=vol_colors, name="Volume",
             xaxis="x3", yaxis="y3", showlegend=True,
             hovertemplate="%{x}<br>Volume: %{y:,.0f}<extra></extra>",
         ))
 
-    if buy_x_plot:
+    if buy_x:
         fig.add_trace(go.Scatter(
-            x=buy_x_plot, y=buy_y, mode="markers",
+            x=buy_x, y=buy_y, mode="markers",
             marker=dict(symbol="triangle-up", size=12, color="green", line=dict(width=2, color="black")),
             name="BUY Entry", xaxis="x", yaxis="y"
         ))
-    if sell_x_plot:
+    if sell_x:
         fig.add_trace(go.Scatter(
-            x=sell_x_plot, y=sell_y, mode="markers",
+            x=sell_x, y=sell_y, mode="markers",
             marker=dict(symbol="triangle-down", size=12, color="red", line=dict(width=2, color="black")),
             name="SELL Exit", xaxis="x", yaxis="y"
         ))
@@ -499,44 +463,85 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
     # ---- MARKET CLOSED ANNOTATIONS ----
     if show_closed_gaps and closed_gaps:
         for gap in closed_gaps:
-            if use_cat:
-                # In categorical mode: find the last filtered index before
-                # the gap starts and annotate with a vertical line + label
-                x_pos = ts_to_idx(gap["x0"])
-                fig.add_vline(
-                    x=x_pos,
-                    line=dict(color="rgba(120,120,160,0.35)", width=1, dash="dot"),
-                    layer="below",
-                )
-                fig.add_annotation(
-                    x=x_pos, xref="x",
-                    y=1.01, yref="paper",
-                    text=gap["label"],
-                    showarrow=False,
-                    font=dict(size=9, color="rgba(180,180,210,0.85)"),
-                    xanchor="left",
-                    bgcolor="rgba(30,30,50,0.55)",
-                    borderpad=3,
-                )
-            else:
-                fig.add_vrect(
-                    x0=gap["x0"], x1=gap["x1"],
-                    fillcolor="rgba(120,120,160,0.07)",
-                    line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
-                    layer="below",
-                )
-                fig.add_annotation(
-                    x=gap["x0"], xref="x",
-                    y=1.01, yref="paper",
-                    text=gap["label"],
-                    showarrow=False,
-                    font=dict(size=9, color="rgba(180,180,210,0.85)"),
-                    xanchor="left",
-                    bgcolor="rgba(30,30,50,0.55)",
-                    borderpad=3,
-                )
+            # Subtle shaded column behind the price pane
+            fig.add_vrect(
+                x0=gap["x0"], x1=gap["x1"],
+                fillcolor="rgba(120,120,160,0.07)",
+                line=dict(color="rgba(120,120,160,0.20)", width=0.5, dash="dot"),
+                layer="below",
+            )
+            # Small label pinned just above the chart area
+            fig.add_annotation(
+                x=gap["x0"],
+                xref="x",
+                y=1.01,
+                yref="paper",
+                text=gap["label"],
+                showarrow=False,
+                font=dict(size=9, color="rgba(180,180,210,0.85)"),
+                xanchor="left",
+                bgcolor="rgba(30,30,50,0.50)",
+                borderpad=3,
+            )
 
-    # ---- FAIR VALUE GAPS ----
+    # ---- RISK / REWARD ZONES ----
+    if show_rr and "rr_state" in st.session_state:
+        rr = st.session_state.rr_state
+        entry = rr["entry"]
+        sl    = rr["sl"]
+        tp    = rr["tp"]
+        x0    = df["Datetime"].iloc[0]
+        x1    = df["Datetime"].iloc[-1]
+
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        ratio  = reward / risk if risk > 0 else 0
+
+        # Stop loss zone (red)
+        fig.add_hrect(
+            y0=min(entry, sl), y1=max(entry, sl),
+            fillcolor="rgba(255,60,60,0.15)",
+            line=dict(color="rgba(255,60,60,0.0)", width=0),
+            layer="below",
+        )
+        # Take profit zone (green)
+        fig.add_hrect(
+            y0=min(entry, tp), y1=max(entry, tp),
+            fillcolor="rgba(0,200,100,0.15)",
+            line=dict(color="rgba(0,200,100,0.0)", width=0),
+            layer="below",
+        )
+        # Entry line
+        fig.add_hline(y=entry, line=dict(color="rgba(255,255,255,0.8)", width=1.5, dash="dash"))
+        # SL line
+        fig.add_hline(y=sl, line=dict(color="rgba(255,60,60,0.9)", width=1.5, dash="dot"))
+        # TP line
+        fig.add_hline(y=tp, line=dict(color="rgba(0,200,100,0.9)", width=1.5, dash="dot"))
+
+        # Labels on the right
+        fig.add_annotation(x=1, xref="paper", y=entry, yref="y",
+            text=f" Entry {entry:,.4f}", showarrow=False,
+            font=dict(color="rgba(255,255,255,0.9)", size=10), xanchor="left")
+        fig.add_annotation(x=1, xref="paper", y=sl, yref="y",
+            text=f" SL {sl:,.4f}", showarrow=False,
+            font=dict(color="rgba(255,80,80,0.9)", size=10), xanchor="left")
+        fig.add_annotation(x=1, xref="paper", y=tp, yref="y",
+            text=f" TP {tp:,.4f}", showarrow=False,
+            font=dict(color="rgba(0,220,100,0.9)", size=10), xanchor="left")
+
+        # R:R label on chart
+        if show_rr_on_chart:
+            fig.add_annotation(
+                x=0.01, xref="paper",
+                y=tp, yref="y",
+                text=f"R:R  1:{ratio:.2f}",
+                showarrow=False,
+                font=dict(color="rgba(255,220,50,0.95)", size=12),
+                bgcolor="rgba(0,0,0,0.45)",
+                borderpad=4,
+                xanchor="left",
+            )
+
     if show_fvg:
         auto_fvgs   = find_fair_value_gaps(df)[-fvg_max:]
         all_fvgs    = auto_fvgs + (extra_fvgs or [])
@@ -562,17 +567,10 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 border_col = "rgba(255,60,60,0.60)"  if not is_manual else "rgba(255,100,100,0.85)"
                 dash_style = "solid"
 
-            if use_cat:
-                x0_plot = ts_to_idx(fvg["start_time"])
-                x1_plot = ts_to_idx(fvg["end_time"])
-            else:
-                x0_plot = fvg["start_time"]
-                x1_plot = fvg["end_time"]
-
             fig.add_shape(
                 type="rect",
-                x0=x0_plot, x1=x1_plot, xref="x",
-                y0=fvg["bottom"], y1=fvg["top"], yref="y",
+                x0=fvg["start_time"], x1=fvg["end_time"], xref="x",
+                y0=fvg["bottom"],     y1=fvg["top"],       yref="y",
                 fillcolor=fill_col,
                 line=dict(color=border_col, width=1 if not is_manual else 1.5, dash=dash_style),
             )
@@ -580,7 +578,7 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                 mid   = (fvg["top"] + fvg["bottom"]) / 2
                 label = ("✏️ " if is_manual else "") + ("Bull FVG" if is_bull else "Bear FVG") + (" ✓" if is_filled else "")
                 fig.add_annotation(
-                    x=x0_plot, xref="x", y=mid, yref="y",
+                    x=fvg["start_time"], xref="x", y=mid, yref="y",
                     text=label, showarrow=False,
                     font=dict(color="rgba(0,230,120,0.9)" if is_bull else "rgba(255,100,100,0.9)", size=9),
                     xanchor="left", bgcolor="rgba(0,0,0,0.35)",
@@ -599,7 +597,6 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                     marker=dict(size=10, color="rgba(255,60,60,0.6)", symbol="square"),
                     name="Bearish FVG", xaxis="x", yaxis="y")); bear_legend = True
 
-    # ---- VOLUME PROFILE ----
     if show_vp:
         vp = compute_volume_profile(df, bins=vp_bins)
         if vp is not None:
@@ -642,23 +639,8 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
                     text=f" VAL {val:,.2f}", showarrow=False,
                     font=dict(color="rgba(50,200,180,0.9)", size=10), xanchor="left")
 
-    # ---- LAYOUT ----
-    xaxis_cfg = dict(
-        rangeslider=dict(visible=False),
-        domain=[0, 0.82],
-        showticklabels=True,
-    )
-    if use_cat and tickvals is not None:
-        xaxis_cfg.update(
-            tickmode="array",
-            tickvals=tickvals,
-            ticktext=ticktext,
-            tickangle=-45,
-            tickfont=dict(size=10),
-        )
-
     fig.update_layout(
-        xaxis=xaxis_cfg,
+        xaxis=dict(rangeslider=dict(visible=False), domain=[0, 0.82], showticklabels=False),
         xaxis2=dict(domain=[0.83, 1.0], showgrid=False, showticklabels=False,
                     zeroline=False, range=[0, 1.05], fixedrange=True, autorange="reversed"),
         xaxis3=dict(domain=[0, 0.82], matches="x", showgrid=False),
@@ -666,9 +648,64 @@ def render_chart(df, buy_x, buy_y, sell_x, sell_y, fast_period, slow_period,
         yaxis3=dict(domain=[0.0, 0.20], showgrid=False, showticklabels=False, zeroline=False, fixedrange=True),
         height=680, template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(r=120, b=60, t=40), bargap=0,
+        margin=dict(r=120, b=40, t=40), bargap=0,
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================
+# RISK / REWARD TOOL
+# ============================================================
+def rr_tool_ui(df: pd.DataFrame) -> dict:
+    """Render the R:R input UI and return the current rr_state dict."""
+    if "rr_state" not in st.session_state:
+        mid = float(df["Close"].iloc[-1])
+        st.session_state.rr_state = {
+            "entry":   mid,
+            "sl":      mid * 0.98,
+            "tp":      mid * 1.04,
+            "enabled": False,
+        }
+
+    state = st.session_state.rr_state
+
+    st.markdown("#### ⚖️ Risk / Reward Tool")
+    st.caption("Set Entry, Stop Loss and Take Profit. Zones will appear on the chart.")
+
+    col1, col2, col3 = st.columns(3)
+    price_fmt = "%.2f" if float(df["Close"].iloc[-1]) > 10 else "%.5f"
+
+    with col1:
+        state["entry"] = st.number_input("Entry Price", value=float(state["entry"]),
+                                          format=price_fmt, key="rr_entry")
+    with col2:
+        state["sl"] = st.number_input("Stop Loss", value=float(state["sl"]),
+                                       format=price_fmt, key="rr_sl")
+    with col3:
+        state["tp"] = st.number_input("Take Profit", value=float(state["tp"]),
+                                       format=price_fmt, key="rr_tp")
+
+    entry = state["entry"]
+    sl    = state["sl"]
+    tp    = state["tp"]
+
+    risk   = abs(entry - sl)
+    reward = abs(tp - entry)
+    rr     = reward / risk if risk > 0 else 0
+
+    risk_dollars   = (rr_risk_pct / 100) * rr_account_size
+    position_size  = risk_dollars / risk if risk > 0 else 0
+    potential_gain = reward * position_size
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("R:R Ratio",       f"1 : {rr:.2f}",         delta="Good" if rr >= 2 else "Low", delta_color="normal" if rr >= 2 else "inverse")
+    m2.metric("Risk $",          f"${risk_dollars:,.2f}")
+    m3.metric("Position Size",   f"{position_size:,.4f} units")
+    m4.metric("Potential Gain",  f"${potential_gain:,.2f}")
+
+    st.session_state.rr_state = state
+    return state
+
 
 # ============================================================
 # MANUAL FVG MANAGER
@@ -831,6 +868,8 @@ if app_mode == "📊 Backtest":
         st.subheader("📊 Interactive Market Chart & Execution Flags")
 
         manual_fvgs = manual_fvg_ui(df)
+        if show_rr:
+            rr_tool_ui(df)
         render_chart(df, buy_signals_x, buy_signals_y, sell_signals_x, sell_signals_y,
                      fast_period, slow_period, extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
 
@@ -904,6 +943,8 @@ elif app_mode == "🧪 Simulation":
                         st.rerun()
             if not df_chart.empty:
                 manual_fvgs = manual_fvg_ui(df_chart)
+                if show_rr:
+                    rr_tool_ui(df_chart)
                 render_chart(df_chart, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
                              st.session_state.sim_sell_x, st.session_state.sim_sell_y,
                              fast_period, slow_period, extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
@@ -960,6 +1001,8 @@ elif app_mode == "🧪 Simulation":
                     st.rerun()
 
         manual_fvgs = manual_fvg_ui(df_visible)
+        if show_rr:
+            rr_tool_ui(df_visible)
         render_chart(df_visible, st.session_state.sim_buy_x, st.session_state.sim_buy_y,
                      st.session_state.sim_sell_x, st.session_state.sim_sell_y,
                      fast_period, slow_period, extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
@@ -1093,6 +1136,8 @@ elif app_mode == "🤖 Robinhood Live":
             st.subheader("📊 Live Chart")
             if not df_live.empty:
                 manual_fvgs = manual_fvg_ui(df_live)
+                if show_rr:
+                    rr_tool_ui(df_live)
                 render_chart(df_live, [], [], [], [], fast_period, slow_period,
                              extra_fvgs=manual_fvgs, closed_gaps=closed_gaps)
 
